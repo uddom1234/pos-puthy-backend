@@ -148,6 +148,7 @@ app.get('/api/products', authenticateToken, async (req, res) => {
       sql += ' WHERE category = ?';
       params.push(category);
     }
+    sql += ' ORDER BY name';
     const [rows] = await pool.query(sql, params);
 
     // Batch-load per-product option groups and values, and compose optionSchema
@@ -219,6 +220,12 @@ app.post('/api/products', authenticateToken, async (req, res) => {
       );
       const insertedId = result.insertId;
 
+      // Ensure category exists in user_categories
+      await conn.query(
+        'INSERT IGNORE INTO user_categories (user_id, name) VALUES (?,?)',
+        [Number(req.user.id), req.body.category]
+      );
+
       // Persist option schema relationally if provided
       if (Array.isArray(req.body.optionSchema) && req.body.optionSchema.length) {
         for (const group of req.body.optionSchema) {
@@ -285,6 +292,14 @@ app.put('/api/products/:id', authenticateToken, async (req, res) => {
       if (fields.length) {
         values.push(id);
         await conn.query(`UPDATE products SET ${fields.join(', ')} WHERE id = ?`, values);
+      }
+
+      // Ensure category exists in user_categories if category was updated
+      if (req.body.category !== undefined) {
+        await conn.query(
+          'INSERT IGNORE INTO user_categories (user_id, name) VALUES (?,?)',
+          [Number(req.user.id), req.body.category]
+        );
       }
 
       // 3) Upsert option groups/values, then prune obsolete ones
@@ -784,7 +799,21 @@ app.post('/api/categories', authenticateToken, async (req, res) => {
 app.delete('/api/categories/:name', authenticateToken, async (req, res) => {
   try {
     const pool = getPool();
-    await pool.query('DELETE FROM user_categories WHERE user_id = ? AND name = ?', [Number(req.user.id), req.params.name]);
+    const categoryName = req.params.name;
+    
+    // Check if any products use this category
+    const [productRows] = await pool.query(
+      'SELECT COUNT(*) as count FROM products WHERE category = ?',
+      [categoryName]
+    );
+    
+    if (productRows[0].count > 0) {
+      return res.status(400).json({ 
+        message: `Cannot delete category "${categoryName}" because it is used by ${productRows[0].count} product(s). Please update or delete those products first.` 
+      });
+    }
+    
+    await pool.query('DELETE FROM user_categories WHERE user_id = ? AND name = ?', [Number(req.user.id), categoryName]);
     const [rows] = await pool.query('SELECT name FROM user_categories WHERE user_id = ? ORDER BY name', [Number(req.user.id)]);
     res.json(rows.map(r => r.name));
   } catch (error) {
