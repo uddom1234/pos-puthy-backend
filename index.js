@@ -1,4 +1,6 @@
 const express = require('express');
+const multer = require('multer');
+const AWS = require('aws-sdk');
 const cors = require('cors');
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
@@ -27,6 +29,142 @@ const JWT_SECRET = 'your-super-secret-jwt-key-change-in-production';
 // Middleware
 app.use(cors());
 app.use(express.json());
+// Backblaze B2 upload URL endpoint
+app.get('/api/storage/b2/upload-url', async (req, res) => {
+  try {
+    const keyId = process.env.BACKBLAZE_KEY_ID || process.env.B2_KEY_ID || '005e168d73cc2b10000000003';
+    const appKey = process.env.BACKBLAZE_APP_KEY || process.env.B2_APPLICATION_KEY || 'K0055biOfO7BFDEEhZynzDdMAhkK9PI';
+    const bucketId = process.env.BACKBLAZE_BUCKET_ID || process.env.B2_BUCKET_ID || '8e41d6d81dc7338c9c920b11';
+    const bucketName = process.env.BACKBLAZE_BUCKET_NAME || process.env.B2_BUCKET_NAME || 'pu-thy';
+
+    if (!keyId || !appKey || !bucketId || !bucketName) {
+      return res.status(501).json({
+        message: 'Backblaze is not configured on the server',
+        missing: {
+          BACKBLAZE_KEY_ID: !keyId,
+          BACKBLAZE_APP_KEY: !appKey,
+          BACKBLAZE_BUCKET_ID: !bucketId,
+          BACKBLAZE_BUCKET_NAME: !bucketName,
+        },
+      });
+    }
+
+    const authHeader = 'Basic ' + Buffer.from(`${keyId}:${appKey}`).toString('base64');
+    const authorizeResp = await fetch('https://api.backblazeb2.com/b2api/v2/b2_authorize_account', {
+      method: 'GET',
+      headers: { Authorization: authHeader },
+    });
+    if (!authorizeResp.ok) {
+      const err = await authorizeResp.text();
+      return res.status(500).json({ message: 'Failed to authorize with Backblaze', error: err });
+    }
+    const authorizeJson = await authorizeResp.json();
+    const apiUrl = authorizeJson.apiUrl;
+    const downloadUrl = authorizeJson.downloadUrl;
+    const accountAuthToken = authorizeJson.authorizationToken;
+
+    const uploadUrlResp = await fetch(`${apiUrl}/b2api/v2/b2_get_upload_url`, {
+      method: 'POST',
+      headers: {
+        Authorization: accountAuthToken,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ bucketId }),
+    });
+    if (!uploadUrlResp.ok) {
+      const err = await uploadUrlResp.text();
+      return res.status(500).json({ message: 'Failed to get upload URL', error: err });
+    }
+    const uploadInfo = await uploadUrlResp.json();
+    return res.json({
+      uploadUrl: uploadInfo.uploadUrl,
+      authorizationToken: uploadInfo.authorizationToken,
+      downloadUrl,
+      bucketName,
+    });
+  } catch (e) {
+    console.error('B2 upload-url error', e);
+    return res.status(500).json({ message: 'Server error while getting Backblaze upload URL', error: String(e) });
+  }
+});
+
+// Direct S3-compatible upload via server (optional alternative)
+const upload = multer({ storage: multer.memoryStorage() });
+const s3 = new AWS.S3({
+  endpoint: process.env.B2_S3_ENDPOINT || 's3.us-east-005.backblazeb2.com',
+  accessKeyId: process.env.B2_ACCESS_KEY_ID || '005e168d73cc2b10000000003',
+  secretAccessKey: process.env.B2_SECRET_ACCESS_KEY || 'K0055biOfO7BFDEEhZynzDdMAhkK9PI',
+  region: process.env.B2_REGION || 'us-east-005',
+  s3ForcePathStyle: true,
+  signatureVersion: 'v4',
+});
+
+app.post('/api/storage/b2/upload', upload.single('file'), async (req, res) => {
+  try {
+    const bucket = process.env.B2_BUCKET_NAME || 'pu-thy';
+    if (!bucket) return res.status(501).json({ message: 'B2 bucket not configured' });
+    if (!req.file) return res.status(400).json({ message: 'No file uploaded' });
+
+    const key = `${Date.now()}-${(req.file.originalname || 'file').replace(/\s+/g, '-')}`;
+    const params = {
+      Bucket: bucket,
+      Key: key,
+      Body: req.file.buffer,
+      ContentType: req.file.mimetype,
+      ACL: 'public-read',
+    };
+    const result = await s3.upload(params).promise();
+    return res.json({ url: result.Location, key: result.Key });
+  } catch (e) {
+    console.error('S3 upload error', e);
+    return res.status(500).json({ message: 'Failed to upload to B2 S3', error: String(e) });
+  }
+});
+
+// Media upload routes using controller-style organization (compatibility with your previous setup)
+// Lightweight inline versions mimicking your pasted TypeScript controllers
+app.post('/api/media/upload', upload.single('file'), async (req, res) => {
+  try {
+    const bucket = process.env.B2_BUCKET_NAME || 'pu-thy';
+    if (!bucket) return res.status(501).json({ error: 'B2 bucket not configured' });
+    if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
+
+    const key = `images/${Date.now()}-${(req.file.originalname || 'file').replace(/\s+/g, '-')}`;
+    const params = {
+      Bucket: bucket,
+      Key: key,
+      Body: req.file.buffer,
+      ContentType: req.file.mimetype,
+      ACL: 'public-read',
+    };
+    const result = await s3.upload(params).promise();
+    res.json({
+      message: 'Media uploaded successfully',
+      mediaUrl: result.Location,
+      s3Key: result.Key,
+      mediaType: (req.file.mimetype || '').startsWith('video/') ? 'video' : 'image',
+      originalName: req.file.originalname,
+      size: req.file.size,
+    });
+  } catch (e) {
+    console.error('Upload error', e);
+    res.status(500).json({ error: 'Failed to upload media' });
+  }
+});
+
+app.delete('/api/media/:s3Key', async (req, res) => {
+  try {
+    const bucket = process.env.B2_BUCKET_NAME || 'pu-thy';
+    const { s3Key } = req.params;
+    if (!bucket) return res.status(501).json({ error: 'B2 bucket not configured' });
+    if (!s3Key) return res.status(400).json({ error: 'S3 key is required' });
+    await s3.deleteObject({ Bucket: bucket, Key: s3Key }).promise();
+    res.json({ message: 'Media deleted successfully' });
+  } catch (e) {
+    console.error('Delete media error', e);
+    res.status(500).json({ error: 'Failed to delete media' });
+  }
+});
 
 // All data now stored in MySQL via queries
 
@@ -42,6 +180,34 @@ async function ensureUsersTableAndDefaults() {
       role ENUM('admin','staff') NOT NULL DEFAULT 'staff',
       name VARCHAR(100) NOT NULL,
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+  `);
+
+  // Create user_categories table if it doesn't exist
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS user_categories (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      user_id INT NOT NULL,
+      name VARCHAR(100) NOT NULL,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE KEY unique_user_category (user_id, name),
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+  `);
+
+  // Create expense_categories table if it doesn't exist
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS expense_categories (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      user_id INT NOT NULL,
+      name VARCHAR(100) NOT NULL,
+      description TEXT,
+      color VARCHAR(7) DEFAULT '#3B82F6',
+      is_active TINYINT(1) NOT NULL DEFAULT 1,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      UNIQUE KEY unique_user_category (user_id, name),
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
   `);
 
@@ -64,6 +230,45 @@ async function ensureUsersTableAndDefaults() {
       , [inserts]
     );
   }
+
+  // Add default categories for admin user
+  const [adminUser] = await pool.query('SELECT id FROM users WHERE username = ?', ['admin']);
+  if (adminUser.length > 0) {
+    const adminId = adminUser[0].id;
+    await pool.query(
+      'INSERT IGNORE INTO user_categories (user_id, name) VALUES (?, ?), (?, ?)',
+      [adminId, 'coffee', adminId, 'food']
+    );
+    
+    // Add default expense categories for admin user
+    try {
+      // First try with description column
+      await pool.query(
+        `INSERT IGNORE INTO expense_categories (user_id, name, description, color) VALUES 
+         (?, 'General', 'General expense category', '#6B7280'),
+         (?, 'Office Supplies', 'Office supplies and stationery', '#10B981'),
+         (?, 'Utilities', 'Electricity, water, internet, etc.', '#F59E0B'),
+         (?, 'Rent', 'Rent and lease payments', '#EF4444'),
+         (?, 'Marketing', 'Marketing and advertising expenses', '#8B5CF6')`,
+        [adminId, adminId, adminId, adminId, adminId]
+      );
+    } catch (e) {
+      // If description column doesn't exist, try without it
+      if (e.code === 'ER_BAD_FIELD_ERROR' && e.sqlMessage.includes('description')) {
+        await pool.query(
+          `INSERT IGNORE INTO expense_categories (user_id, name, color) VALUES 
+           (?, 'General', '#6B7280'),
+           (?, 'Office Supplies', '#10B981'),
+           (?, 'Utilities', '#F59E0B'),
+           (?, 'Rent', '#EF4444'),
+           (?, 'Marketing', '#8B5CF6')`,
+          [adminId, adminId, adminId, adminId, adminId]
+        );
+      } else {
+        throw e;
+      }
+    }
+  }
 }
 
 // Ensure transactions table has required columns for cash/qr payments
@@ -83,12 +288,12 @@ async function ensureTransactionsSchema() {
   }
 }
 
-// Ensure orders table has payment status
+// Ensure orders table has payment status and method columns
 async function ensureOrdersSchema() {
   const pool = getPool();
   // Add payment_status column if missing
   try {
-    await pool.query("ALTER TABLE orders ADD COLUMN payment_status ENUM('unpaid','paid','partial') NOT NULL DEFAULT 'unpaid' AFTER status");
+        await pool.query("ALTER TABLE orders ADD COLUMN payment_status ENUM('unpaid','paid') NOT NULL DEFAULT 'unpaid'");
   } catch (e) {
     if (!(e && (e.code === 'ER_DUP_FIELDNAME' || e.errno === 1060))) throw e;
   }
@@ -142,7 +347,7 @@ app.get('/api/products', authenticateToken, async (req, res) => {
   try {
     const { category } = req.query;
     const pool = getPool();
-    let sql = 'SELECT id, name, category, price, stock, low_stock_threshold AS lowStockThreshold, description, metadata, option_schema AS optionSchema FROM products';
+    let sql = 'SELECT id, name, category, price, stock, has_stock AS hasStock, low_stock_threshold AS lowStockThreshold, description, image_url AS imageUrl, metadata, option_schema AS optionSchema FROM products';
     const params = [];
     if (category) {
       sql += ' WHERE category = ?';
@@ -163,11 +368,20 @@ app.get('/api/products', authenticateToken, async (req, res) => {
       let valuesByGroupId = {};
       if (groupIds.length) {
         const [values] = await pool.query(
-          'SELECT id, group_id AS groupId, label, `value`, price_delta AS priceDelta FROM product_option_values WHERE group_id IN (?)',
+          'SELECT id, group_id AS groupId, label, `value`, price_delta AS priceDelta, value_type AS valueType, value_number AS valueNumber, value_boolean AS valueBoolean, value_date AS valueDate FROM product_option_values WHERE group_id IN (?)',
           [groupIds]
         );
         values.forEach(v => {
-          (valuesByGroupId[v.groupId] = valuesByGroupId[v.groupId] || []).push({ label: v.label, value: v.value, priceDelta: Number(v.priceDelta) });
+          const option = { 
+            label: v.label, 
+            value: v.value, 
+            priceDelta: Number(v.priceDelta),
+            valueType: v.valueType || 'text',
+            valueNumber: v.valueNumber,
+            valueBoolean: v.valueBoolean === 1,
+            valueDate: v.valueDate
+          };
+          (valuesByGroupId[v.groupId] = valuesByGroupId[v.groupId] || []).push(option);
         });
       }
       groups.forEach(g => {
@@ -193,7 +407,7 @@ app.get('/api/products/low-stock', authenticateToken, async (req, res) => {
   try {
     const pool = getPool();
     const [rows] = await pool.query(
-      'SELECT id, name, category, price, stock, low_stock_threshold AS lowStockThreshold, description FROM products WHERE stock <= low_stock_threshold'
+      'SELECT id, name, category, price, stock, low_stock_threshold AS lowStockThreshold, description, image_url AS imageUrl FROM products WHERE stock <= low_stock_threshold'
     );
     rows.forEach(r => (r.id = String(r.id)));
     res.json(rows);
@@ -214,9 +428,19 @@ app.post('/api/products', authenticateToken, async (req, res) => {
       await conn.beginTransaction();
       const metadata = req.body.metadata ? JSON.stringify(req.body.metadata) : null;
       const [result] = await conn.query(
-        `INSERT INTO products (name, category, price, stock, low_stock_threshold, description, metadata, option_schema)
-         VALUES (?,?,?,?,?,?,?,NULL)`,
-        [req.body.name, req.body.category, req.body.price, req.body.stock, req.body.lowStockThreshold, req.body.description || null, metadata]
+        `INSERT INTO products (name, category, price, stock, has_stock, low_stock_threshold, description, image_url, metadata, option_schema)
+         VALUES (?,?,?,?,?,?,?,?,?,NULL)`,
+        [
+          req.body.name,
+          req.body.category,
+          req.body.price,
+          req.body.stock,
+          req.body.hasStock !== undefined ? req.body.hasStock : true,
+          req.body.lowStockThreshold,
+          req.body.description || null,
+          req.body.imageUrl || null,
+          metadata,
+        ]
       );
       const insertedId = result.insertId;
 
@@ -235,9 +459,21 @@ app.post('/api/products', authenticateToken, async (req, res) => {
           );
           const groupId = gRes.insertId;
           for (const opt of group.options || []) {
+            const valueType = opt.valueType || 'text';
+            const valueNumber = valueType === 'number' ? (opt.valueNumber || 0) : null;
+            const valueBoolean = valueType === 'boolean' ? (opt.valueBoolean ? 1 : 0) : null;
+            const valueDate = valueType === 'date' ? (opt.valueDate || null) : null;
+            const canonicalValue = (
+              valueType === 'text' ? (opt.value || '') :
+              valueType === 'number' ? String(valueNumber ?? '') :
+              valueType === 'boolean' ? (valueBoolean ? 'true' : 'false') :
+              valueType === 'date' ? (valueDate || '') :
+              ''
+            );
+            
             await conn.query(
-              'INSERT INTO product_option_values (group_id, label, `value`, price_delta) VALUES (?,?,?,?)',
-              [groupId, opt.label || '', opt.value || '', Number(opt.priceDelta || 0)]
+              'INSERT INTO product_option_values (group_id, label, `value`, price_delta, value_type, value_number, value_boolean, value_date) VALUES (?,?,?,?,?,?,?,?)',
+              [groupId, opt.label || '', canonicalValue, Number(opt.priceDelta || 0), valueType, valueNumber, valueBoolean, valueDate]
             );
           }
         }
@@ -283,7 +519,7 @@ app.put('/api/products/:id', authenticateToken, async (req, res) => {
       }
 
       // 2) Update base fields
-      const map = { name:'name', category:'category', price:'price', stock:'stock', lowStockThreshold:'low_stock_threshold', description:'description' };
+      const map = { name:'name', category:'category', price:'price', stock:'stock', hasStock:'has_stock', lowStockThreshold:'low_stock_threshold', description:'description', imageUrl:'image_url' };
       const fields = [], values = [];
       for (const [k, col] of Object.entries(map)) {
         if (req.body[k] !== undefined) { fields.push(`${col} = ?`); values.push(req.body[k]); }
@@ -334,31 +570,77 @@ app.put('/api/products/:id', authenticateToken, async (req, res) => {
           // Upsert values for this group
           const opts = Array.isArray(g.options) ? g.options : [];
           if (opts.length) {
-            // Build tuples
-            const tuples = opts.map(o => [
-              groupId,
-              (o.label || '').slice(0,255),
-              (o.value || '').slice(0,255),
-              Number(o.priceDelta || 0)
-            ]);
+            // Build tuples with typed values
+            const tuples = opts.map(o => {
+              const valueType = o.valueType || 'text';
+              const valueNumber = valueType === 'number' ? (o.valueNumber || 0) : null;
+              const valueBoolean = valueType === 'boolean' ? (o.valueBoolean ? 1 : 0) : null;
+              const valueDate = valueType === 'date' ? (o.valueDate || null) : null;
+              const canonicalValue = (
+                valueType === 'text' ? (o.value || '') :
+                valueType === 'number' ? String(valueNumber ?? '') :
+                valueType === 'boolean' ? (valueBoolean ? 'true' : 'false') :
+                valueType === 'date' ? (valueDate || '') :
+                ''
+              );
+              
+              return [
+                groupId,
+                (o.label || '').slice(0,255),
+                canonicalValue.slice(0,255),
+                Number(o.priceDelta || 0),
+                valueType,
+                valueNumber,
+                valueBoolean,
+                valueDate
+              ];
+            });
             // Insert/update by unique (group_id, value)
             await conn.query(
-              `INSERT INTO product_option_values (group_id, label, \`value\`, price_delta)
+              `INSERT INTO product_option_values (group_id, label, \`value\`, price_delta, value_type, value_number, value_boolean, value_date)
                VALUES ?
                ON DUPLICATE KEY UPDATE
                  label=VALUES(label),
-                 price_delta=VALUES(price_delta)`,
+                 price_delta=VALUES(price_delta),
+                 value_type=VALUES(value_type),
+                 value_number=VALUES(value_number),
+                 value_boolean=VALUES(value_boolean),
+                 value_date=VALUES(value_date)`,
               [tuples]
             );
 
             // Prune values that are no longer present
-            const keepValues = opts.map(o => (o.value || '').slice(0,255));
-            if (keepValues.length) {
-              await conn.query(
-                `DELETE FROM product_option_values
-                 WHERE group_id = ? AND \`value\` NOT IN (?)`,
-                [groupId, keepValues]
+            // Use a combination of label and value to identify unique options
+            const keepIdentifiers = opts.map(o => {
+              const valueType = o.valueType || 'text';
+              const valueNumber = valueType === 'number' ? (o.valueNumber || 0) : null;
+              const valueBoolean = valueType === 'boolean' ? (o.valueBoolean ? 1 : 0) : null;
+              const valueDate = valueType === 'date' ? (o.valueDate || null) : null;
+              const canonicalValue = (
+                valueType === 'text' ? (o.value || '') :
+                valueType === 'number' ? String(valueNumber ?? '') :
+                valueType === 'boolean' ? (valueBoolean ? 'true' : 'false') :
+                valueType === 'date' ? (valueDate || '') :
+                ''
               );
+              return `${(o.label || '').slice(0,255)}|${canonicalValue.slice(0,255)}`;
+            });
+            if (keepIdentifiers.length) {
+              // Delete options that don't match any of the current identifiers
+              const [existingValues] = await conn.query(
+                'SELECT id, label, `value` FROM product_option_values WHERE group_id = ?',
+                [groupId]
+              );
+              const toDelete = existingValues.filter(existing => {
+                const identifier = `${existing.label}|${existing.value}`;
+                return !keepIdentifiers.includes(identifier);
+              });
+              if (toDelete.length) {
+                await conn.query(
+                  'DELETE FROM product_option_values WHERE id IN (?)',
+                  [toDelete.map(v => v.id)]
+                );
+              }
             } else {
               await conn.query('DELETE FROM product_option_values WHERE group_id = ?', [groupId]);
             }
@@ -509,7 +791,8 @@ app.post('/api/transactions', authenticateToken, async (req, res) => {
         [txId, item.productId ? Number(item.productId) : null, item.productName, item.quantity, item.price, item.customizations ? JSON.stringify(item.customizations) : null]
       );
       if (item.productId) {
-        await conn.query('UPDATE products SET stock = stock - ? WHERE id = ?', [item.quantity, Number(item.productId)]);
+        // Only update stock for items that have stock management enabled
+        await conn.query('UPDATE products SET stock = stock - ? WHERE id = ? AND has_stock = 1', [item.quantity, Number(item.productId)]);
       }
     }
 
@@ -537,7 +820,11 @@ app.get('/api/income-expenses', authenticateToken, async (req, res) => {
   try {
     const { startDate, endDate, type, category } = req.query;
     const pool = getPool();
-    let sql = 'SELECT id, type, category, description, amount, date FROM income_expenses WHERE user_id = ?';
+    let sql = `SELECT ie.id, ie.type, ie.category, ie.category_id, ie.description, ie.amount, ie.date,
+               ec.name as category_name, ec.color as category_color
+               FROM income_expenses ie
+               LEFT JOIN expense_categories ec ON ie.category_id = ec.id
+               WHERE ie.user_id = ?`;
     const params = [Number(req.user.id)];
     if (startDate && endDate) { sql += ' AND date BETWEEN ? AND ?'; params.push(startDate, endDate); }
     if (type) { sql += ' AND type = ?'; params.push(type); }
@@ -555,10 +842,21 @@ app.post('/api/income-expenses', authenticateToken, async (req, res) => {
   try {
     const pool = getPool();
     const date = req.body.date ? new Date(req.body.date) : new Date();
+    
+    // Determine which category_id to use based on type
+    let categoryId = null;
+    let incomeCategoryId = null;
+    
+    if (req.body.type === 'income' && req.body.categoryId) {
+      incomeCategoryId = req.body.categoryId;
+    } else if (req.body.type === 'expense' && req.body.categoryId) {
+      categoryId = req.body.categoryId;
+    }
+    
     const [result] = await pool.query(
-      `INSERT INTO income_expenses (type, category, description, amount, date, user_id)
-       VALUES (?,?,?,?,?,?)`,
-      [req.body.type, req.body.category, req.body.description || null, req.body.amount, date, Number(req.user.id)]
+      `INSERT INTO income_expenses (type, category, category_id, income_category_id, description, amount, date, user_id)
+       VALUES (?,?,?,?,?,?,?,?)`,
+      [req.body.type, req.body.category, categoryId, incomeCategoryId, req.body.description || null, req.body.amount, date, Number(req.user.id)]
     );
     res.status(201).json({ id: String(result.insertId), ...req.body, date });
   } catch (error) {
@@ -571,7 +869,7 @@ app.get('/api/orders', authenticateToken, async (req, res) => {
   try {
     const pool = getPool();
     const [rows] = await pool.query(
-      `SELECT id, customer_id AS customerId, items, total, status, payment_status AS paymentStatus, payment_method AS paymentMethod, created_at AS createdAt, table_number AS tableNumber, notes, metadata
+      `SELECT id, customer_id AS customerId, items, total, created_at AS createdAt, table_number AS tableNumber, notes, metadata, payment_status AS paymentStatus, payment_method AS paymentMethod
        FROM orders WHERE user_id = ? ORDER BY created_at DESC`,
       [Number(req.user.id)]
     );
@@ -592,11 +890,11 @@ app.post('/api/orders', authenticateToken, async (req, res) => {
     const pool = getPool();
     const createdAt = new Date();
     const [result] = await pool.query(
-      `INSERT INTO orders (customer_id, items, total, status, payment_status, payment_method, created_at, table_number, notes, metadata, user_id)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
-      [req.body.customerId ? Number(req.body.customerId) : null, JSON.stringify(req.body.items || []), req.body.total, 'pending', req.body.paymentStatus || 'unpaid', req.body.paymentMethod || null, createdAt, req.body.tableNumber || null, req.body.notes || null, req.body.metadata ? JSON.stringify(req.body.metadata) : null, Number(req.user.id)]
+      `INSERT INTO orders (customer_id, items, total, created_at, table_number, notes, metadata, user_id)
+       VALUES (?,?,?,?,?,?,?,?)`,
+      [req.body.customerId ? Number(req.body.customerId) : null, JSON.stringify(req.body.items || []), req.body.total, createdAt, req.body.tableNumber || null, req.body.notes || null, req.body.metadata ? JSON.stringify(req.body.metadata) : null, Number(req.user.id)]
     );
-    res.status(201).json({ id: String(result.insertId), ...req.body, createdAt, status: 'pending' });
+    res.status(201).json({ id: String(result.insertId), ...req.body, createdAt });
   } catch (error) {
     res.status(500).json({ message: 'Server error', error: error.message });
   }
@@ -608,7 +906,7 @@ app.put('/api/orders/:id', authenticateToken, async (req, res) => {
     const pool = getPool();
     const fields = [];
     const values = [];
-    const mapping = { customerId: 'customer_id', items: 'items', total: 'total', status: 'status', paymentStatus: 'payment_status', paymentMethod: 'payment_method', tableNumber: 'table_number', notes: 'notes', metadata: 'metadata' };
+    const mapping = { customerId: 'customer_id', items: 'items', total: 'total', tableNumber: 'table_number', notes: 'notes', metadata: 'metadata' };
     for (const [key, col] of Object.entries(mapping)) {
       if (req.body[key] !== undefined) {
         let v = req.body[key];
@@ -626,16 +924,7 @@ app.put('/api/orders/:id', authenticateToken, async (req, res) => {
   }
 });
 
-app.put('/api/orders/:id/status', authenticateToken, async (req, res) => {
-  try {
-    const pool = getPool();
-    await pool.query('UPDATE orders SET status = ? WHERE id = ?', [req.body.status, req.params.id]);
-    res.json({ id: req.params.id, status: req.body.status });
-  } catch (error) {
-    res.status(500).json({ message: 'Server error', error: error.message });
-  }
-});
-
+// Update order payment status and method
 app.put('/api/orders/:id/payment', authenticateToken, async (req, res) => {
   const pool = getPool();
   const conn = await pool.getConnection();
@@ -655,7 +944,7 @@ app.put('/api/orders/:id/payment', authenticateToken, async (req, res) => {
       return res.status(404).json({ message: 'Order not found' });
     }
     
-    // Update order payment status
+    // Update order payment status and method
     const fields = [];
     const values = [];
     
@@ -821,6 +1110,350 @@ app.delete('/api/categories/:name', authenticateToken, async (req, res) => {
   }
 });
 
+// Income Categories Routes (per-user)
+app.get('/api/income-categories', authenticateToken, async (req, res) => {
+  try {
+    const pool = getPool();
+    let rows;
+    try {
+      // First try with all columns
+      [rows] = await pool.query(
+        'SELECT id, name, description, color, is_active AS isActive, created_at AS createdAt, updated_at AS updatedAt FROM income_categories WHERE user_id = ? ORDER BY name', 
+        [Number(req.user.id)]
+      );
+    } catch (e) {
+      // If table doesn't exist, return empty array
+      if (e.code === 'ER_NO_SUCH_TABLE') {
+        rows = [];
+      } else {
+        throw e;
+      }
+    }
+    rows.forEach(r => (r.id = String(r.id)));
+    res.json(rows);
+  } catch (error) {
+    res.status(500).json({ message: 'Server error', error: error.message });
+  }
+});
+
+app.post('/api/income-categories', authenticateToken, async (req, res) => {
+  const { name, description, color } = req.body;
+  if (!name || typeof name !== 'string') return res.status(400).json({ message: 'Category name required' });
+  
+  try {
+    const pool = getPool();
+    let result, rows;
+    
+    try {
+      // First try with all columns
+      [result] = await pool.query(
+        'INSERT INTO income_categories (user_id, name, description, color, is_active) VALUES (?, ?, ?, ?, ?)',
+        [Number(req.user.id), name, description || null, color || '#10B981', 1]
+      );
+      
+      [rows] = await pool.query(
+        'SELECT id, name, description, color, is_active AS isActive, created_at AS createdAt, updated_at AS updatedAt FROM income_categories WHERE id = ?',
+        [result.insertId]
+      );
+    } catch (e) {
+      // If table doesn't exist, return error
+      if (e.code === 'ER_NO_SUCH_TABLE') {
+        return res.status(400).json({ message: 'Income categories table not found. Please run the migration script first.' });
+      } else {
+        throw e;
+      }
+    }
+    
+    const category = rows[0];
+    category.id = String(category.id);
+    res.status(201).json(category);
+  } catch (error) {
+    if (error.code === 'ER_DUP_ENTRY') {
+      res.status(400).json({ message: 'Category name already exists' });
+    } else {
+      res.status(500).json({ message: 'Server error', error: error.message });
+    }
+  }
+});
+
+app.put('/api/income-categories/:id', authenticateToken, async (req, res) => {
+  const { name, description, color, isActive } = req.body;
+  const categoryId = req.params.id;
+  
+  if (!name || typeof name !== 'string') return res.status(400).json({ message: 'Category name required' });
+  
+  try {
+    const pool = getPool();
+    
+    // Check if category belongs to user
+    const [existing] = await pool.query(
+      'SELECT id FROM income_categories WHERE id = ? AND user_id = ?',
+      [categoryId, Number(req.user.id)]
+    );
+    
+    if (existing.length === 0) {
+      return res.status(404).json({ message: 'Category not found' });
+    }
+    
+    let rows;
+    try {
+      // First try with all columns
+      await pool.query(
+        'UPDATE income_categories SET name = ?, description = ?, color = ?, is_active = ? WHERE id = ? AND user_id = ?',
+        [name, description || null, color || '#10B981', isActive !== undefined ? isActive : 1, categoryId, Number(req.user.id)]
+      );
+      
+      [rows] = await pool.query(
+        'SELECT id, name, description, color, is_active AS isActive, created_at AS createdAt, updated_at AS updatedAt FROM income_categories WHERE id = ?',
+        [categoryId]
+      );
+    } catch (e) {
+      // If table doesn't exist, return error
+      if (e.code === 'ER_NO_SUCH_TABLE') {
+        return res.status(400).json({ message: 'Income categories table not found. Please run the migration script first.' });
+      } else {
+        throw e;
+      }
+    }
+    
+    const category = rows[0];
+    category.id = String(category.id);
+    res.json(category);
+  } catch (error) {
+    if (error.code === 'ER_DUP_ENTRY') {
+      res.status(400).json({ message: 'Category name already exists' });
+    } else {
+      res.status(500).json({ message: 'Server error', error: error.message });
+    }
+  }
+});
+
+app.delete('/api/income-categories/:id', authenticateToken, async (req, res) => {
+  try {
+    const pool = getPool();
+    const categoryId = req.params.id;
+    
+    // Check if any income entries use this category
+    const [incomeRows] = await pool.query(
+      'SELECT COUNT(*) as count FROM income_expenses WHERE income_category_id = ?',
+      [categoryId]
+    );
+    
+    if (incomeRows[0].count > 0) {
+      return res.status(400).json({ 
+        message: `Cannot delete category because it is used by ${incomeRows[0].count} income entry(ies). Please update or delete those entries first.` 
+      });
+    }
+    
+    // Check if category belongs to user
+    const [existing] = await pool.query(
+      'SELECT id FROM income_categories WHERE id = ? AND user_id = ?',
+      [categoryId, Number(req.user.id)]
+    );
+    
+    if (existing.length === 0) {
+      return res.status(404).json({ message: 'Category not found' });
+    }
+    
+    await pool.query('DELETE FROM income_categories WHERE id = ? AND user_id = ?', [categoryId, Number(req.user.id)]);
+    res.json({ message: 'Category deleted successfully' });
+  } catch (error) {
+    res.status(500).json({ message: 'Server error', error: error.message });
+  }
+});
+
+// Expense Categories Routes (per-user)
+app.get('/api/expense-categories', authenticateToken, async (req, res) => {
+  try {
+    const pool = getPool();
+    let rows;
+    try {
+      // First try with all columns
+      [rows] = await pool.query(
+        'SELECT id, name, description, color, is_active AS isActive, created_at AS createdAt, updated_at AS updatedAt FROM expense_categories WHERE user_id = ? ORDER BY name', 
+        [Number(req.user.id)]
+      );
+    } catch (e) {
+      // If columns don't exist, try with minimal columns
+      if (e.code === 'ER_BAD_FIELD_ERROR' && (e.sqlMessage.includes('description') || e.sqlMessage.includes('is_active'))) {
+        [rows] = await pool.query(
+          'SELECT id, name, color, created_at AS createdAt FROM expense_categories WHERE user_id = ? ORDER BY name', 
+          [Number(req.user.id)]
+        );
+        // Add missing fields for compatibility
+        rows = rows.map(row => ({ 
+          ...row, 
+          description: null, 
+          isActive: true,
+          updatedAt: row.createdAt 
+        }));
+      } else {
+        throw e;
+      }
+    }
+    rows.forEach(r => (r.id = String(r.id)));
+    res.json(rows);
+  } catch (error) {
+    res.status(500).json({ message: 'Server error', error: error.message });
+  }
+});
+
+app.post('/api/expense-categories', authenticateToken, async (req, res) => {
+  const { name, description, color } = req.body;
+  if (!name || typeof name !== 'string') return res.status(400).json({ message: 'Category name required' });
+  
+  try {
+    const pool = getPool();
+    let result, rows;
+    
+    try {
+      // First try with all columns
+      [result] = await pool.query(
+        'INSERT INTO expense_categories (user_id, name, description, color, is_active) VALUES (?, ?, ?, ?, ?)',
+        [Number(req.user.id), name, description || null, color || '#3B82F6', 1]
+      );
+      
+      [rows] = await pool.query(
+        'SELECT id, name, description, color, is_active AS isActive, created_at AS createdAt, updated_at AS updatedAt FROM expense_categories WHERE id = ?',
+        [result.insertId]
+      );
+    } catch (e) {
+      // If columns don't exist, try with minimal columns
+      if (e.code === 'ER_BAD_FIELD_ERROR' && (e.sqlMessage.includes('description') || e.sqlMessage.includes('is_active'))) {
+        [result] = await pool.query(
+          'INSERT INTO expense_categories (user_id, name, color) VALUES (?, ?, ?)',
+          [Number(req.user.id), name, color || '#3B82F6']
+        );
+        
+        [rows] = await pool.query(
+          'SELECT id, name, color, created_at AS createdAt FROM expense_categories WHERE id = ?',
+          [result.insertId]
+        );
+        // Add missing fields for compatibility
+        rows = rows.map(row => ({ 
+          ...row, 
+          description: null, 
+          isActive: true,
+          updatedAt: row.createdAt 
+        }));
+      } else {
+        throw e;
+      }
+    }
+    
+    const category = rows[0];
+    category.id = String(category.id);
+    res.status(201).json(category);
+  } catch (error) {
+    if (error.code === 'ER_DUP_ENTRY') {
+      res.status(400).json({ message: 'Category name already exists' });
+    } else {
+      res.status(500).json({ message: 'Server error', error: error.message });
+    }
+  }
+});
+
+app.put('/api/expense-categories/:id', authenticateToken, async (req, res) => {
+  const { name, description, color, isActive } = req.body;
+  const categoryId = req.params.id;
+  
+  if (!name || typeof name !== 'string') return res.status(400).json({ message: 'Category name required' });
+  
+  try {
+    const pool = getPool();
+    
+    // Check if category belongs to user
+    const [existing] = await pool.query(
+      'SELECT id FROM expense_categories WHERE id = ? AND user_id = ?',
+      [categoryId, Number(req.user.id)]
+    );
+    
+    if (existing.length === 0) {
+      return res.status(404).json({ message: 'Category not found' });
+    }
+    
+    let rows;
+    try {
+      // First try with all columns
+      await pool.query(
+        'UPDATE expense_categories SET name = ?, description = ?, color = ?, is_active = ? WHERE id = ? AND user_id = ?',
+        [name, description || null, color || '#3B82F6', isActive !== undefined ? isActive : 1, categoryId, Number(req.user.id)]
+      );
+      
+      [rows] = await pool.query(
+        'SELECT id, name, description, color, is_active AS isActive, created_at AS createdAt, updated_at AS updatedAt FROM expense_categories WHERE id = ?',
+        [categoryId]
+      );
+    } catch (e) {
+      // If columns don't exist, try with minimal columns
+      if (e.code === 'ER_BAD_FIELD_ERROR' && (e.sqlMessage.includes('description') || e.sqlMessage.includes('is_active'))) {
+        await pool.query(
+          'UPDATE expense_categories SET name = ?, color = ? WHERE id = ? AND user_id = ?',
+          [name, color || '#3B82F6', categoryId, Number(req.user.id)]
+        );
+        
+        [rows] = await pool.query(
+          'SELECT id, name, color, created_at AS createdAt FROM expense_categories WHERE id = ?',
+          [categoryId]
+        );
+        // Add missing fields for compatibility
+        rows = rows.map(row => ({ 
+          ...row, 
+          description: null, 
+          isActive: true,
+          updatedAt: row.createdAt 
+        }));
+      } else {
+        throw e;
+      }
+    }
+    
+    const category = rows[0];
+    category.id = String(category.id);
+    res.json(category);
+  } catch (error) {
+    if (error.code === 'ER_DUP_ENTRY') {
+      res.status(400).json({ message: 'Category name already exists' });
+    } else {
+      res.status(500).json({ message: 'Server error', error: error.message });
+    }
+  }
+});
+
+app.delete('/api/expense-categories/:id', authenticateToken, async (req, res) => {
+  try {
+    const pool = getPool();
+    const categoryId = req.params.id;
+    
+    // Check if any income/expenses use this category
+    const [expenseRows] = await pool.query(
+      'SELECT COUNT(*) as count FROM income_expenses WHERE category_id = ?',
+      [categoryId]
+    );
+    
+    if (expenseRows[0].count > 0) {
+      return res.status(400).json({ 
+        message: `Cannot delete category because it is used by ${expenseRows[0].count} expense(s). Please update or delete those expenses first.` 
+      });
+    }
+    
+    // Check if category belongs to user
+    const [existing] = await pool.query(
+      'SELECT id FROM expense_categories WHERE id = ? AND user_id = ?',
+      [categoryId, Number(req.user.id)]
+    );
+    
+    if (existing.length === 0) {
+      return res.status(404).json({ message: 'Category not found' });
+    }
+    
+    await pool.query('DELETE FROM expense_categories WHERE id = ? AND user_id = ?', [categoryId, Number(req.user.id)]);
+    res.json({ message: 'Category deleted successfully' });
+  } catch (error) {
+    res.status(500).json({ message: 'Server error', error: error.message });
+  }
+});
+
 // Customers Routes
 app.get('/api/customers', authenticateToken, async (req, res) => {
   try {
@@ -926,7 +1559,7 @@ app.get('/api/reports/sales-summary', authenticateToken, async (req, res) => {
       ieParams
     );
     const [orderRows] = await pool.query(
-      `SELECT total, status, created_at AS createdAt FROM orders ${orderWhere}`,
+      `SELECT total, created_at AS createdAt FROM orders ${orderWhere}`,
       orderParams
     );
 
@@ -1202,12 +1835,12 @@ app.delete('/api/products/:id', authenticateToken, async (req, res) => {
 app.put('/api/income-expenses/:id', authenticateToken, async (req, res) => {
   try {
     const pool = getPool();
-    const { type, category, description, amount } = req.body;
+    const { type, category, categoryId, description, amount } = req.body;
     const id = req.params.id;
     
     await pool.query(
-      'UPDATE income_expenses SET type = ?, category = ?, description = ?, amount = ? WHERE id = ?',
-      [type, category, description, amount, id]
+      'UPDATE income_expenses SET type = ?, category = ?, category_id = ?, description = ?, amount = ? WHERE id = ?',
+      [type, category, categoryId || null, description, amount, id]
     );
     
     res.json({ message: 'Entry updated successfully' });
