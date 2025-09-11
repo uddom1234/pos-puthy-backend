@@ -93,7 +93,7 @@ const upload = multer({ storage: multer.memoryStorage() });
 const s3 = new AWS.S3({
   endpoint: process.env.B2_S3_ENDPOINT || 's3.us-east-005.backblazeb2.com',
   accessKeyId: process.env.B2_ACCESS_KEY_ID || '005e168d73cc2b10000000003',
-  secretAccessKey: process.env.B2_SECRET_ACCESS_KEY,
+  secretAccessKey: process.env.B2_SECRET_ACCESS_KEY || 'K0055biOfO7BFDEEhZynzDdMAhkK9PI',
   region: process.env.B2_REGION || 'us-east-005',
   s3ForcePathStyle: true,
   signatureVersion: 'v4',
@@ -101,7 +101,7 @@ const s3 = new AWS.S3({
 
 app.post('/api/storage/b2/upload', upload.single('file'), async (req, res) => {
   try {
-    const bucket = process.env.B2_BUCKET_NAME;
+    const bucket = 'pu-thy';
     if (!bucket) return res.status(501).json({ message: 'B2 bucket not configured' });
     if (!req.file) return res.status(400).json({ message: 'No file uploaded' });
 
@@ -125,7 +125,7 @@ app.post('/api/storage/b2/upload', upload.single('file'), async (req, res) => {
 // Lightweight inline versions mimicking your pasted TypeScript controllers
 app.post('/api/media/upload', upload.single('file'), async (req, res) => {
   try {
-    const bucket = process.env.B2_BUCKET_NAME;
+    const bucket = 'pu-thy';
     if (!bucket) return res.status(501).json({ error: 'B2 bucket not configured' });
     if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
 
@@ -154,7 +154,7 @@ app.post('/api/media/upload', upload.single('file'), async (req, res) => {
 
 app.delete('/api/media/:s3Key', async (req, res) => {
   try {
-    const bucket = process.env.B2_BUCKET_NAME;
+    const bucket = 'pu-thy';
     const { s3Key } = req.params;
     if (!bucket) return res.status(501).json({ error: 'B2 bucket not configured' });
     if (!s3Key) return res.status(400).json({ error: 'S3 key is required' });
