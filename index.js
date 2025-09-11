@@ -24,18 +24,18 @@ function sleep(ms) {
 const { initializeDatabase, getPool } = require('./db');
 const app = express();
 const PORT = process.env.PORT || 5000;
-const JWT_SECRET = 'your-super-secret-jwt-key-change-in-production';
+const JWT_SECRET = process.env.JWT_SECRET || 'your-super-secret-jwt-key-change-in-production';
 
-// Middleware
+// Middleware 
 app.use(cors());
 app.use(express.json());
 // Backblaze B2 upload URL endpoint
 app.get('/api/storage/b2/upload-url', async (req, res) => {
   try {
-    const keyId = process.env.BACKBLAZE_KEY_ID || process.env.B2_KEY_ID || '005e168d73cc2b10000000003';
-    const appKey = process.env.BACKBLAZE_APP_KEY || process.env.B2_APPLICATION_KEY || 'K0055biOfO7BFDEEhZynzDdMAhkK9PI';
-    const bucketId = process.env.BACKBLAZE_BUCKET_ID || process.env.B2_BUCKET_ID || '8e41d6d81dc7338c9c920b11';
-    const bucketName = process.env.BACKBLAZE_BUCKET_NAME || process.env.B2_BUCKET_NAME || 'pu-thy';
+    const keyId = process.env.BACKBLAZE_KEY_ID || process.env.B2_KEY_ID;
+    const appKey = process.env.BACKBLAZE_APP_KEY || process.env.B2_APPLICATION_KEY;
+    const bucketId = process.env.BACKBLAZE_BUCKET_ID || process.env.B2_BUCKET_ID;
+    const bucketName = process.env.BACKBLAZE_BUCKET_NAME || process.env.B2_BUCKET_NAME;
 
     if (!keyId || !appKey || !bucketId || !bucketName) {
       return res.status(501).json({
@@ -92,7 +92,7 @@ app.get('/api/storage/b2/upload-url', async (req, res) => {
 const upload = multer({ storage: multer.memoryStorage() });
 const s3 = new AWS.S3({
   endpoint: process.env.B2_S3_ENDPOINT || 's3.us-east-005.backblazeb2.com',
-  accessKeyId: process.env.B2_ACCESS_KEY_ID || '005e168d73cc2b10000000003',
+  accessKeyId: process.env.B2_ACCESS_KEY_ID,
   secretAccessKey: process.env.B2_SECRET_ACCESS_KEY,
   region: process.env.B2_REGION || 'us-east-005',
   s3ForcePathStyle: true,
@@ -101,7 +101,7 @@ const s3 = new AWS.S3({
 
 app.post('/api/storage/b2/upload', upload.single('file'), async (req, res) => {
   try {
-    const bucket = process.env.B2_BUCKET_NAME || 'pu-thy';
+    const bucket = process.env.B2_BUCKET_NAME;
     if (!bucket) return res.status(501).json({ message: 'B2 bucket not configured' });
     if (!req.file) return res.status(400).json({ message: 'No file uploaded' });
 
@@ -125,7 +125,7 @@ app.post('/api/storage/b2/upload', upload.single('file'), async (req, res) => {
 // Lightweight inline versions mimicking your pasted TypeScript controllers
 app.post('/api/media/upload', upload.single('file'), async (req, res) => {
   try {
-    const bucket = process.env.B2_BUCKET_NAME || 'pu-thy';
+    const bucket = process.env.B2_BUCKET_NAME;
     if (!bucket) return res.status(501).json({ error: 'B2 bucket not configured' });
     if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
 
@@ -154,7 +154,7 @@ app.post('/api/media/upload', upload.single('file'), async (req, res) => {
 
 app.delete('/api/media/:s3Key', async (req, res) => {
   try {
-    const bucket = process.env.B2_BUCKET_NAME || 'pu-thy';
+    const bucket = process.env.B2_BUCKET_NAME;
     const { s3Key } = req.params;
     if (!bucket) return res.status(501).json({ error: 'B2 bucket not configured' });
     if (!s3Key) return res.status(400).json({ error: 'S3 key is required' });
