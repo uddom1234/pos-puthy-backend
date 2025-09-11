@@ -93,7 +93,7 @@ const upload = multer({ storage: multer.memoryStorage() });
 const s3 = new AWS.S3({
   endpoint: process.env.B2_S3_ENDPOINT || 's3.us-east-005.backblazeb2.com',
   accessKeyId: process.env.B2_ACCESS_KEY_ID || '005e168d73cc2b10000000003',
-  secretAccessKey: process.env.B2_SECRET_ACCESS_KEY || 'K0055biOfO7BFDEEhZynzDdMAhkK9PI',
+  secretAccessKey: process.env.B2_SECRET_ACCESS_KEY,
   region: process.env.B2_REGION || 'us-east-005',
   s3ForcePathStyle: true,
   signatureVersion: 'v4',
