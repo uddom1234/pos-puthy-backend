@@ -195,6 +195,22 @@ async function ensureUsersTableAndDefaults() {
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
   `);
 
+  // Create income_categories table if it doesn't exist
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS income_categories (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      user_id INT NOT NULL,
+      name VARCHAR(100) NOT NULL,
+      description TEXT,
+      color VARCHAR(7) DEFAULT '#10B981',
+      is_active TINYINT(1) NOT NULL DEFAULT 1,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      UNIQUE KEY unique_user_income_category (user_id, name),
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+  `);
+
   // Create expense_categories table if it doesn't exist
   await pool.query(`
     CREATE TABLE IF NOT EXISTS expense_categories (
@@ -208,6 +224,152 @@ async function ensureUsersTableAndDefaults() {
       updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
       UNIQUE KEY unique_user_category (user_id, name),
       FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+  `);
+
+  // Create income_expenses table if it doesn't exist
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS income_expenses (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      type ENUM('income','expense') NOT NULL,
+      category VARCHAR(100) NOT NULL,
+      description TEXT,
+      amount DECIMAL(10,2) NOT NULL,
+      date DATETIME NOT NULL,
+      user_id INT NOT NULL,
+      category_id INT DEFAULT NULL,
+      income_category_id INT DEFAULT NULL,
+      FOREIGN KEY (user_id) REFERENCES users(id),
+      FOREIGN KEY (category_id) REFERENCES expense_categories(id) ON DELETE SET NULL,
+      FOREIGN KEY (income_category_id) REFERENCES income_categories(id) ON DELETE SET NULL
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+  `);
+
+  // Create transactions table if it doesn't exist
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS transactions (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      subtotal DECIMAL(10,2) NOT NULL,
+      discount DECIMAL(10,2) NOT NULL DEFAULT '0.00',
+      total DECIMAL(10,2) NOT NULL,
+      payment_method ENUM('cash','qr') NOT NULL,
+      cash_received DECIMAL(10,2) DEFAULT NULL,
+      change_back DECIMAL(10,2) DEFAULT NULL,
+      status ENUM('paid','unpaid') NOT NULL,
+      date DATETIME NOT NULL,
+      user_id INT NOT NULL,
+      customer_id INT DEFAULT NULL,
+      loyalty_points_used INT DEFAULT '0',
+      loyalty_points_earned INT DEFAULT '0',
+      FOREIGN KEY (user_id) REFERENCES users(id),
+      FOREIGN KEY (customer_id) REFERENCES customers(id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+  `);
+
+  // Create transaction_items table if it doesn't exist
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS transaction_items (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      transaction_id INT NOT NULL,
+      product_id INT DEFAULT NULL,
+      product_name VARCHAR(255) NOT NULL,
+      quantity INT NOT NULL,
+      price DECIMAL(10,2) NOT NULL,
+      customizations JSON DEFAULT NULL,
+      FOREIGN KEY (transaction_id) REFERENCES transactions(id) ON DELETE CASCADE,
+      FOREIGN KEY (product_id) REFERENCES products(id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+  `);
+
+  // Create products table if it doesn't exist
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS products (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      name VARCHAR(255) NOT NULL,
+      category VARCHAR(100) NOT NULL,
+      price DECIMAL(10,2) NOT NULL,
+      stock INT NOT NULL DEFAULT '0',
+      has_stock TINYINT(1) NOT NULL DEFAULT '1',
+      low_stock_threshold INT NOT NULL DEFAULT '0',
+      description TEXT,
+      metadata JSON DEFAULT NULL,
+      option_schema JSON DEFAULT NULL,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      image_url VARCHAR(512) DEFAULT NULL
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+  `);
+
+  // Create product_option_groups table if it doesn't exist
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS product_option_groups (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      product_id INT NOT NULL,
+      \`key\` VARCHAR(100) NOT NULL,
+      label VARCHAR(255) NOT NULL,
+      type ENUM('single','multi') NOT NULL DEFAULT 'single',
+      required TINYINT(1) NOT NULL DEFAULT '0',
+      UNIQUE KEY uniq_product_key (product_id, \`key\`),
+      FOREIGN KEY (product_id) REFERENCES products(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+  `);
+
+  // Create product_option_values table if it doesn't exist
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS product_option_values (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      group_id INT NOT NULL,
+      label VARCHAR(255) NOT NULL,
+      \`value\` VARCHAR(255) NOT NULL,
+      value_type ENUM('text','number','boolean','date') NOT NULL DEFAULT 'text',
+      value_number DECIMAL(12,4) DEFAULT NULL,
+      value_boolean TINYINT(1) DEFAULT NULL,
+      value_date DATE DEFAULT NULL,
+      price_delta DECIMAL(10,2) NOT NULL DEFAULT '0.00',
+      UNIQUE KEY uniq_group_value (group_id, \`value\`),
+      FOREIGN KEY (group_id) REFERENCES product_option_groups(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+  `);
+
+  // Create customers table if it doesn't exist
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS customers (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      phone VARCHAR(30) NOT NULL UNIQUE,
+      name VARCHAR(255) NOT NULL,
+      loyalty_points INT NOT NULL DEFAULT '0',
+      member_card VARCHAR(100) DEFAULT NULL UNIQUE,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+  `);
+
+  // Create orders table if it doesn't exist
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS orders (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      customer_id INT DEFAULT NULL,
+      items JSON NOT NULL,
+      total DECIMAL(10,2) NOT NULL,
+      payment_status ENUM('unpaid','paid') NOT NULL DEFAULT 'unpaid',
+      payment_method ENUM('cash','qr') DEFAULT NULL,
+      created_at DATETIME NOT NULL,
+      table_number VARCHAR(50) DEFAULT NULL,
+      notes TEXT,
+      metadata JSON DEFAULT NULL,
+      user_id INT NOT NULL,
+      FOREIGN KEY (customer_id) REFERENCES customers(id),
+      FOREIGN KEY (user_id) REFERENCES users(id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+  `);
+
+  // Create user_schemas table if it doesn't exist
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS user_schemas (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      user_id INT NOT NULL,
+      type ENUM('product','order') NOT NULL,
+      schema_json JSON NOT NULL,
+      UNIQUE KEY unique_user_type (user_id, type),
+      FOREIGN KEY (user_id) REFERENCES users(id)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
   `);
 
@@ -729,11 +891,18 @@ app.get('/api/transactions', authenticateToken, async (req, res) => {
 });
 
 app.post('/api/transactions', authenticateToken, async (req, res) => {
+  console.log('Transaction request received:', JSON.stringify(req.body, null, 2));
   const pool = getPool();
-  const conn = await pool.getConnection();
-  try {
-    await conn.beginTransaction();
-    const now = new Date();
+  const MAX_RETRIES = 3;
+  
+  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+    const conn = await pool.getConnection();
+    try {
+      console.log(`Transaction attempt ${attempt}/${MAX_RETRIES}...`);
+      await conn.query('SET SESSION innodb_lock_wait_timeout = 5');
+      await conn.query('SET SESSION transaction_isolation="READ-COMMITTED"');
+      await conn.beginTransaction();
+      const now = new Date();
     // Validate and normalize payment
     const method = req.body.paymentMethod;
     if (method !== 'cash' && method !== 'qr') {
@@ -751,13 +920,17 @@ app.post('/api/transactions', authenticateToken, async (req, res) => {
     let changeBack = null;
     if (method === 'cash') {
       cashReceived = Number(req.body.cashReceived || 0);
-      if (isNaN(cashReceived) || cashReceived < total) {
+      // Only check cash sufficiency if the transaction is being marked as paid
+      if (status === 'paid' && (isNaN(cashReceived) || cashReceived < total)) {
         await conn.rollback();
         conn.release();
         return res.status(400).json({ message: 'Insufficient cash received.' });
       }
-      changeBack = Number((cashReceived - total).toFixed(2));
-      status = 'paid';
+      if (status === 'paid') {
+        changeBack = Number((cashReceived - total).toFixed(2));
+      } else {
+        changeBack = null;
+      }
     } else {
       // QR can be 'paid' or 'unpaid'
       status = status === 'paid' ? 'paid' : 'unpaid';
@@ -783,35 +956,87 @@ app.post('/api/transactions', authenticateToken, async (req, res) => {
     );
     const txId = result.insertId;
 
-    // Insert items and update stock
+    // Lock products first to prevent deadlocks, then insert items
+    const productIds = [];
+    for (const item of req.body.items || []) {
+      if (item.productId) {
+        productIds.push(Number(item.productId));
+      }
+    }
+    
+    // Lock all products at once to prevent deadlocks
+    if (productIds.length > 0) {
+      const placeholders = productIds.map(() => '?').join(',');
+      await conn.query(`SELECT id FROM products WHERE id IN (${placeholders}) AND has_stock = 1 FOR UPDATE`, productIds);
+    }
+
+    // Insert transaction items
     for (const item of req.body.items || []) {
       await conn.query(
         `INSERT INTO transaction_items (transaction_id, product_id, product_name, quantity, price, customizations)
          VALUES (?,?,?,?,?,?)`,
         [txId, item.productId ? Number(item.productId) : null, item.productName, item.quantity, item.price, item.customizations ? JSON.stringify(item.customizations) : null]
       );
+    }
+
+    // Update stock for all items (products are already locked)
+    for (const item of req.body.items || []) {
       if (item.productId) {
-        // Only update stock for items that have stock management enabled
         await conn.query('UPDATE products SET stock = stock - ? WHERE id = ? AND has_stock = 1', [item.quantity, Number(item.productId)]);
       }
     }
 
     // Auto-create income entry for paid transactions
     if (status === 'paid') {
+      // Ensure 'Sales' income category exists
       await conn.query(
-        `INSERT INTO income_expenses (type, category, description, amount, date, user_id)
-         VALUES (?,?,?,?,?,?)`,
-        ['income', 'Sales', `POS Sale #${txId}`, total, now, Number(req.user.id)]
+        `INSERT IGNORE INTO income_categories (user_id, name, description, color)
+         VALUES (?,?,?,?)`,
+        [Number(req.user.id), 'Sales', 'Point of Sale transactions', '#10B981']
       );
+      
+      // Get the income category ID
+      const [incomeCategoryResult] = await conn.query(
+        'SELECT id FROM income_categories WHERE user_id = ? AND name = ?',
+        [Number(req.user.id), 'Sales']
+      );
+      
+      if (incomeCategoryResult.length > 0) {
+        await conn.query(
+          `INSERT INTO income_expenses (type, category, description, amount, date, user_id, income_category_id)
+           VALUES (?,?,?,?,?,?,?)`,
+          ['income', 'Sales', `POS Sale #${txId}`, total, now, Number(req.user.id), incomeCategoryResult[0].id]
+        );
+      }
     }
 
-    await conn.commit();
-    res.status(201).json({ id: String(txId), ...req.body, status, cashReceived, changeBack, date: now });
-  } catch (error) {
-    await conn.rollback();
-    res.status(500).json({ message: 'Server error', error: error.message });
-  } finally {
-    conn.release();
+      console.log('Committing transaction...');
+      await conn.commit();
+      console.log('Transaction completed successfully with ID:', txId);
+      res.status(201).json({ id: String(txId), ...req.body, status, cashReceived, changeBack, date: now });
+      conn.release();
+      return; // Success, exit retry loop
+    } catch (error) {
+      console.error(`Transaction attempt ${attempt} error:`, error);
+      await conn.rollback();
+      conn.release();
+      
+      // Check if this is a retryable error
+      const errno = error.errno || error.code;
+      const isRetryable = errno === 1205 || errno === 'ER_LOCK_WAIT_TIMEOUT' || // lock wait timeout
+                         errno === 1213 || errno === 'ER_LOCK_DEADLOCK' ||     // deadlock
+                         errno === 3572;                                       // NOWAIT
+      
+      if (isRetryable && attempt < MAX_RETRIES) {
+        console.log(`Retrying transaction (attempt ${attempt + 1}/${MAX_RETRIES})...`);
+        await new Promise(resolve => setTimeout(resolve, 100 * attempt)); // Exponential backoff
+        continue;
+      }
+      
+      // If not retryable or max retries reached, return error
+      res.status(500).json({ message: 'Server error', error: error.message });
+      return;
+    }
   }
 });
 
@@ -820,10 +1045,12 @@ app.get('/api/income-expenses', authenticateToken, async (req, res) => {
   try {
     const { startDate, endDate, type, category } = req.query;
     const pool = getPool();
-    let sql = `SELECT ie.id, ie.type, ie.category, ie.category_id, ie.description, ie.amount, ie.date,
-               ec.name as category_name, ec.color as category_color
+    let sql = `SELECT ie.id, ie.type, ie.category, ie.category_id, ie.income_category_id, ie.description, ie.amount, ie.date,
+               ec.name as category_name, ec.color as category_color,
+               ic.name as income_category_name, ic.color as income_category_color
                FROM income_expenses ie
                LEFT JOIN expense_categories ec ON ie.category_id = ec.id
+               LEFT JOIN income_categories ic ON ie.income_category_id = ic.id
                WHERE ie.user_id = ?`;
     const params = [Number(req.user.id)];
     if (startDate && endDate) { sql += ' AND date BETWEEN ? AND ?'; params.push(startDate, endDate); }
@@ -1007,11 +1234,26 @@ app.put('/api/orders/:id/payment', authenticateToken, async (req, res) => {
       }
       
       // Create income entry for paid orders
+      // Ensure 'Sales' income category exists
       await conn.query(
-        `INSERT INTO income_expenses (type, category, description, amount, date, user_id)
-         VALUES (?,?,?,?,?,?)`,
-        ['income', 'Sales', `Order #${orderId} Payment`, total, now, Number(req.user.id)]
+        `INSERT IGNORE INTO income_categories (user_id, name, description, color)
+         VALUES (?,?,?,?)`,
+        [Number(req.user.id), 'Sales', 'Point of Sale transactions', '#10B981']
       );
+      
+      // Get the income category ID
+      const [incomeCategoryResult] = await conn.query(
+        'SELECT id FROM income_categories WHERE user_id = ? AND name = ?',
+        [Number(req.user.id), 'Sales']
+      );
+      
+      if (incomeCategoryResult.length > 0) {
+        await conn.query(
+          `INSERT INTO income_expenses (type, category, description, amount, date, user_id, income_category_id)
+           VALUES (?,?,?,?,?,?,?)`,
+          ['income', 'Sales', `Order #${orderId} Payment`, total, now, Number(req.user.id), incomeCategoryResult[0].id]
+        );
+      }
     }
     
     await conn.commit();
