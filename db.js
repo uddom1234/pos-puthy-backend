@@ -1,7 +1,7 @@
 const mysql = require('mysql2/promise');
 
-const DB_HOST = '167.172.84.179';
-const DB_USER = 'root';
+const DB_HOST = '146.190.81.53';
+const DB_USER = 'uddom1234';
 const DB_PASSWORD = 'jkiller8';
 const DB_NAME = 'saas_pos';
 
