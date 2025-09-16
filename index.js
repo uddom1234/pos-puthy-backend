@@ -183,51 +183,42 @@ async function ensureUsersTableAndDefaults() {
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
   `);
 
-  // Create user_categories table if it doesn't exist
+  // Create user_categories table if it doesn't exist (now shared across all users)
   await pool.query(`
     CREATE TABLE IF NOT EXISTS user_categories (
       id INT AUTO_INCREMENT PRIMARY KEY,
-      user_id INT NOT NULL,
-      name VARCHAR(100) NOT NULL,
-      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-      UNIQUE KEY unique_user_category (user_id, name),
-      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+      name VARCHAR(100) NOT NULL UNIQUE,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
   `);
 
-  // Create income_categories table if it doesn't exist
+  // Create income_categories table if it doesn't exist (shared across all users)
   await pool.query(`
     CREATE TABLE IF NOT EXISTS income_categories (
       id INT AUTO_INCREMENT PRIMARY KEY,
-      user_id INT NOT NULL,
-      name VARCHAR(100) NOT NULL,
+      name VARCHAR(100) NOT NULL UNIQUE,
       description TEXT,
       color VARCHAR(7) DEFAULT '#10B981',
       is_active TINYINT(1) NOT NULL DEFAULT 1,
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-      UNIQUE KEY unique_user_income_category (user_id, name),
-      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
   `);
 
-  // Create expense_categories table if it doesn't exist
+  // Create expense_categories table if it doesn't exist (shared across all users)
   await pool.query(`
     CREATE TABLE IF NOT EXISTS expense_categories (
       id INT AUTO_INCREMENT PRIMARY KEY,
-      user_id INT NOT NULL,
-      name VARCHAR(100) NOT NULL,
+      name VARCHAR(100) NOT NULL UNIQUE,
       description TEXT,
       color VARCHAR(7) DEFAULT '#3B82F6',
       is_active TINYINT(1) NOT NULL DEFAULT 1,
       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-      UNIQUE KEY unique_user_category (user_id, name),
-      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
   `);
 
-  // Create income_expenses table if it doesn't exist
+  // Create income_expenses table if it doesn't exist (shared across all users)
   await pool.query(`
     CREATE TABLE IF NOT EXISTS income_expenses (
       id INT AUTO_INCREMENT PRIMARY KEY,
@@ -236,16 +227,14 @@ async function ensureUsersTableAndDefaults() {
       description TEXT,
       amount DECIMAL(10,2) NOT NULL,
       date DATETIME NOT NULL,
-      user_id INT NOT NULL,
       category_id INT DEFAULT NULL,
       income_category_id INT DEFAULT NULL,
-      FOREIGN KEY (user_id) REFERENCES users(id),
       FOREIGN KEY (category_id) REFERENCES expense_categories(id) ON DELETE SET NULL,
       FOREIGN KEY (income_category_id) REFERENCES income_categories(id) ON DELETE SET NULL
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
   `);
 
-  // Create transactions table if it doesn't exist
+  // Create transactions table if it doesn't exist (shared across all users)
   await pool.query(`
     CREATE TABLE IF NOT EXISTS transactions (
       id INT AUTO_INCREMENT PRIMARY KEY,
@@ -257,11 +246,9 @@ async function ensureUsersTableAndDefaults() {
       change_back DECIMAL(10,2) DEFAULT NULL,
       status ENUM('paid','unpaid') NOT NULL,
       date DATETIME NOT NULL,
-      user_id INT NOT NULL,
       customer_id INT DEFAULT NULL,
       loyalty_points_used INT DEFAULT '0',
       loyalty_points_earned INT DEFAULT '0',
-      FOREIGN KEY (user_id) REFERENCES users(id),
       FOREIGN KEY (customer_id) REFERENCES customers(id)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
   `);
@@ -288,6 +275,7 @@ async function ensureUsersTableAndDefaults() {
       name VARCHAR(255) NOT NULL,
       category VARCHAR(100) NOT NULL,
       price DECIMAL(10,2) NOT NULL,
+      price_khr DECIMAL(10,2) DEFAULT NULL,
       stock INT NOT NULL DEFAULT '0',
       has_stock TINYINT(1) NOT NULL DEFAULT '1',
       low_stock_threshold INT NOT NULL DEFAULT '0',
@@ -342,7 +330,7 @@ async function ensureUsersTableAndDefaults() {
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
   `);
 
-  // Create orders table if it doesn't exist
+  // Create orders table if it doesn't exist (shared across all users)
   await pool.query(`
     CREATE TABLE IF NOT EXISTS orders (
       id INT AUTO_INCREMENT PRIMARY KEY,
@@ -355,21 +343,32 @@ async function ensureUsersTableAndDefaults() {
       table_number VARCHAR(50) DEFAULT NULL,
       notes TEXT,
       metadata JSON DEFAULT NULL,
-      user_id INT NOT NULL,
-      FOREIGN KEY (customer_id) REFERENCES customers(id),
-      FOREIGN KEY (user_id) REFERENCES users(id)
+      FOREIGN KEY (customer_id) REFERENCES customers(id)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
   `);
 
-  // Create user_schemas table if it doesn't exist
+  // Create user_schemas table if it doesn't exist (now shared across all users)
   await pool.query(`
     CREATE TABLE IF NOT EXISTS user_schemas (
       id INT AUTO_INCREMENT PRIMARY KEY,
-      user_id INT NOT NULL,
-      type ENUM('product','order') NOT NULL,
+      type ENUM('product','order') NOT NULL UNIQUE,
       schema_json JSON NOT NULL,
-      UNIQUE KEY unique_user_type (user_id, type),
-      FOREIGN KEY (user_id) REFERENCES users(id)
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+  `);
+
+  // Create currency_rates table if it doesn't exist
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS currency_rates (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      from_currency VARCHAR(3) NOT NULL,
+      to_currency VARCHAR(3) NOT NULL,
+      rate DECIMAL(10,4) NOT NULL,
+      is_active TINYINT(1) NOT NULL DEFAULT 1,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      UNIQUE KEY unique_currency_pair (from_currency, to_currency)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
   `);
 
@@ -393,44 +392,7 @@ async function ensureUsersTableAndDefaults() {
     );
   }
 
-  // Add default categories for admin user
-  const [adminUser] = await pool.query('SELECT id FROM users WHERE username = ?', ['admin']);
-  if (adminUser.length > 0) {
-    const adminId = adminUser[0].id;
-    await pool.query(
-      'INSERT IGNORE INTO user_categories (user_id, name) VALUES (?, ?), (?, ?)',
-      [adminId, 'coffee', adminId, 'food']
-    );
-    
-    // Add default expense categories for admin user
-    try {
-      // First try with description column
-      await pool.query(
-        `INSERT IGNORE INTO expense_categories (user_id, name, description, color) VALUES 
-         (?, 'General', 'General expense category', '#6B7280'),
-         (?, 'Office Supplies', 'Office supplies and stationery', '#10B981'),
-         (?, 'Utilities', 'Electricity, water, internet, etc.', '#F59E0B'),
-         (?, 'Rent', 'Rent and lease payments', '#EF4444'),
-         (?, 'Marketing', 'Marketing and advertising expenses', '#8B5CF6')`,
-        [adminId, adminId, adminId, adminId, adminId]
-      );
-    } catch (e) {
-      // If description column doesn't exist, try without it
-      if (e.code === 'ER_BAD_FIELD_ERROR' && e.sqlMessage.includes('description')) {
-        await pool.query(
-          `INSERT IGNORE INTO expense_categories (user_id, name, color) VALUES 
-           (?, 'General', '#6B7280'),
-           (?, 'Office Supplies', '#10B981'),
-           (?, 'Utilities', '#F59E0B'),
-           (?, 'Rent', '#EF4444'),
-           (?, 'Marketing', '#8B5CF6')`,
-          [adminId, adminId, adminId, adminId, adminId]
-        );
-      } else {
-        throw e;
-      }
-    }
-  }
+  // No default seeding - categories will be created by users as needed
 }
 
 // Ensure transactions table has required columns for cash/qr payments
@@ -464,6 +426,247 @@ async function ensureOrdersSchema() {
     await pool.query("ALTER TABLE orders ADD COLUMN payment_method ENUM('cash','qr') NULL AFTER payment_status");
   } catch (e) {
     if (!(e && (e.code === 'ER_DUP_FIELDNAME' || e.errno === 1060))) throw e;
+  }
+}
+
+// Remove user_id from orders table (migration to shared system)
+async function removeUserIdFromOrders() {
+  const pool = getPool();
+  try {
+    // Check if user_id column exists
+    const [columns] = await pool.query("SHOW COLUMNS FROM orders LIKE 'user_id'");
+    if (columns.length > 0) {
+      // First drop the foreign key constraint
+      try {
+        await pool.query("ALTER TABLE orders DROP FOREIGN KEY fk_orders_user");
+      } catch (e) {
+        if (e.code !== 'ER_CANT_DROP_FIELD_OR_KEY') {
+          console.log('Could not drop fk_orders_user constraint:', e.message);
+        }
+      }
+      // Then drop the user_id column
+      await pool.query("ALTER TABLE orders DROP COLUMN user_id");
+      console.log('Removed user_id column from orders table');
+    }
+  } catch (e) {
+    if (e.code === 'ER_CANT_DROP_FIELD_OR_KEY') {
+      console.log('user_id column does not exist in orders table');
+    } else {
+      console.error('Error removing user_id from orders:', e);
+    }
+  }
+}
+
+// Remove user_id from income_expenses table (migration to shared system)
+async function removeUserIdFromIncomeExpenses() {
+  const pool = getPool();
+  try {
+    // Check if user_id column exists
+    const [columns] = await pool.query("SHOW COLUMNS FROM income_expenses LIKE 'user_id'");
+    if (columns.length > 0) {
+      // First drop the foreign key constraint
+      try {
+        await pool.query("ALTER TABLE income_expenses DROP FOREIGN KEY fk_ie_user");
+      } catch (e) {
+        if (e.code !== 'ER_CANT_DROP_FIELD_OR_KEY') {
+          console.log('Could not drop fk_ie_user constraint:', e.message);
+        }
+      }
+      // Then drop the user_id column
+      await pool.query("ALTER TABLE income_expenses DROP COLUMN user_id");
+      console.log('Removed user_id column from income_expenses table');
+    }
+  } catch (e) {
+    if (e.code === 'ER_CANT_DROP_FIELD_OR_KEY') {
+      console.log('user_id column does not exist in income_expenses table');
+    } else {
+      console.error('Error removing user_id from income_expenses:', e);
+    }
+  }
+}
+
+// Remove user_id from income_categories table (migration to shared system)
+async function removeUserIdFromIncomeCategories() {
+  const pool = getPool();
+  try {
+    // Check if user_id column exists
+    const [columns] = await pool.query("SHOW COLUMNS FROM income_categories LIKE 'user_id'");
+    if (columns.length > 0) {
+      // First drop the foreign key constraint
+      try {
+        await pool.query("ALTER TABLE income_categories DROP FOREIGN KEY fk_income_categories_user");
+      } catch (e) {
+        if (e.code !== 'ER_CANT_DROP_FIELD_OR_KEY') {
+          console.log('Could not drop fk_income_categories_user constraint:', e.message);
+        }
+      }
+      
+      // Handle duplicate category names before removing user_id
+      // Get all categories grouped by name
+      const [duplicates] = await pool.query(`
+        SELECT name, COUNT(*) as count, GROUP_CONCAT(id ORDER BY id) as ids
+        FROM income_categories 
+        GROUP BY name 
+        HAVING COUNT(*) > 1
+      `);
+      
+      // For each duplicate name, keep the first one and delete the rest
+      for (const dup of duplicates) {
+        const ids = dup.ids.split(',').map(id => parseInt(id.trim()));
+        const keepId = ids[0]; // Keep the first one
+        const deleteIds = ids.slice(1); // Delete the rest
+        
+        if (deleteIds.length > 0) {
+          console.log(`Removing duplicate income categories for '${dup.name}': keeping ID ${keepId}, deleting IDs ${deleteIds.join(', ')}`);
+          await pool.query(`DELETE FROM income_categories WHERE id IN (${deleteIds.join(',')})`);
+        }
+      }
+      
+      // Drop the user_id column
+      await pool.query("ALTER TABLE income_categories DROP COLUMN user_id");
+      
+      // Add unique constraint on name if it doesn't exist
+      try {
+        await pool.query("ALTER TABLE income_categories ADD UNIQUE KEY unique_name (name)");
+      } catch (e) {
+        if (e.code !== 'ER_DUP_KEYNAME') throw e;
+      }
+      console.log('Removed user_id column from income_categories table');
+    }
+  } catch (e) {
+    if (e.code === 'ER_CANT_DROP_FIELD_OR_KEY') {
+      console.log('user_id column does not exist in income_categories table');
+    } else {
+      console.error('Error removing user_id from income_categories:', e);
+    }
+  }
+}
+
+// Remove user_id from expense_categories table (migration to shared system)
+async function removeUserIdFromExpenseCategories() {
+  const pool = getPool();
+  try {
+    // Check if user_id column exists
+    const [columns] = await pool.query("SHOW COLUMNS FROM expense_categories LIKE 'user_id'");
+    if (columns.length > 0) {
+      // First drop the foreign key constraint
+      try {
+        await pool.query("ALTER TABLE expense_categories DROP FOREIGN KEY expense_categories_ibfk_1");
+      } catch (e) {
+        if (e.code !== 'ER_CANT_DROP_FIELD_OR_KEY') {
+          console.log('Could not drop expense_categories_ibfk_1 constraint:', e.message);
+        }
+      }
+      
+      // Handle duplicate category names before removing user_id
+      // Get all categories grouped by name
+      const [duplicates] = await pool.query(`
+        SELECT name, COUNT(*) as count, GROUP_CONCAT(id ORDER BY id) as ids
+        FROM expense_categories 
+        GROUP BY name 
+        HAVING COUNT(*) > 1
+      `);
+      
+      // For each duplicate name, keep the first one and delete the rest
+      for (const dup of duplicates) {
+        const ids = dup.ids.split(',').map(id => parseInt(id.trim()));
+        const keepId = ids[0]; // Keep the first one
+        const deleteIds = ids.slice(1); // Delete the rest
+        
+        if (deleteIds.length > 0) {
+          console.log(`Removing duplicate expense categories for '${dup.name}': keeping ID ${keepId}, deleting IDs ${deleteIds.join(', ')}`);
+          await pool.query(`DELETE FROM expense_categories WHERE id IN (${deleteIds.join(',')})`);
+        }
+      }
+      
+      // Drop the user_id column
+      await pool.query("ALTER TABLE expense_categories DROP COLUMN user_id");
+      
+      // Add unique constraint on name if it doesn't exist
+      try {
+        await pool.query("ALTER TABLE expense_categories ADD UNIQUE KEY unique_name (name)");
+      } catch (e) {
+        if (e.code !== 'ER_DUP_KEYNAME') throw e;
+      }
+      console.log('Removed user_id column from expense_categories table');
+    }
+  } catch (e) {
+    if (e.code === 'ER_CANT_DROP_FIELD_OR_KEY') {
+      console.log('user_id column does not exist in expense_categories table');
+    } else {
+      console.error('Error removing user_id from expense_categories:', e);
+    }
+  }
+}
+
+// Remove user_id from transactions table (migration to shared system)
+async function removeUserIdFromTransactions() {
+  const pool = getPool();
+  try {
+    // Check if user_id column exists
+    const [columns] = await pool.query("SHOW COLUMNS FROM transactions LIKE 'user_id'");
+    if (columns.length > 0) {
+      // First drop the foreign key constraint
+      try {
+        await pool.query("ALTER TABLE transactions DROP FOREIGN KEY fk_transactions_user");
+      } catch (e) {
+        if (e.code !== 'ER_CANT_DROP_FIELD_OR_KEY') {
+          console.log('Could not drop fk_transactions_user constraint:', e.message);
+        }
+      }
+      // Then drop the user_id column
+      await pool.query("ALTER TABLE transactions DROP COLUMN user_id");
+      console.log('Removed user_id column from transactions table');
+    }
+  } catch (e) {
+    if (e.code === 'ER_CANT_DROP_FIELD_OR_KEY') {
+      console.log('user_id column does not exist in transactions table');
+    } else {
+      console.error('Error removing user_id from transactions:', e);
+    }
+  }
+}
+
+// Add price_khr column to products table (migration for dual currency support)
+async function addPriceKhrToProducts() {
+  const pool = getPool();
+  try {
+    // Check if price_khr column exists
+    const [columns] = await pool.query("SHOW COLUMNS FROM products LIKE 'price_khr'");
+    if (columns.length === 0) {
+      await pool.query("ALTER TABLE products ADD COLUMN price_khr DECIMAL(10,2) DEFAULT NULL AFTER price");
+      console.log('Added price_khr column to products table');
+    }
+  } catch (e) {
+    if (e.code === 'ER_DUP_FIELDNAME') {
+      console.log('price_khr column already exists in products table');
+    } else {
+      console.error('Error adding price_khr column to products:', e);
+    }
+  }
+}
+
+// Initialize default currency rates
+async function initializeCurrencyRates() {
+  const pool = getPool();
+  try {
+    // Check if currency rates exist
+    const [rows] = await pool.query('SELECT COUNT(*) as count FROM currency_rates');
+    if (rows[0].count === 0) {
+      // Insert default USD to KHR rate (4100)
+      await pool.query(
+        'INSERT INTO currency_rates (from_currency, to_currency, rate) VALUES (?, ?, ?)',
+        ['USD', 'KHR', 4100]
+      );
+      // Insert reverse rate
+      await pool.query(
+        'INSERT INTO currency_rates (from_currency, to_currency, rate) VALUES (?, ?, ?)',
+        ['KHR', 'USD', 0.000244]
+      );
+      console.log('Initialized default currency rates');
+    }
+  } catch (e) {
+    console.error('Error initializing currency rates:', e);
   }
 }
 
@@ -504,12 +707,136 @@ app.post('/api/auth/login', async (req, res) => {
   }
 });
 
+// User Management Routes (Admin only)
+app.get('/api/users', authenticateToken, async (req, res) => {
+  if (req.user.role !== 'admin') {
+    return res.status(403).json({ message: 'Admin access required' });
+  }
+  try {
+    const pool = getPool();
+    const [rows] = await pool.query('SELECT id, username, role, name, created_at FROM users ORDER BY created_at DESC');
+    const users = rows.map(user => ({
+      id: String(user.id),
+      username: user.username,
+      role: user.role,
+      name: user.name,
+      createdAt: user.created_at
+    }));
+    res.json(users);
+  } catch (error) {
+    res.status(500).json({ message: 'Server error', error: error.message });
+  }
+});
+
+app.post('/api/users', authenticateToken, async (req, res) => {
+  if (req.user.role !== 'admin') {
+    return res.status(403).json({ message: 'Admin access required' });
+  }
+  try {
+    const { username, password, name, role } = req.body;
+    if (!username || !password || !name || !role) {
+      return res.status(400).json({ message: 'All fields are required' });
+    }
+    
+    const pool = getPool();
+    const hashedPassword = await bcrypt.hash(password, 10);
+    const [result] = await pool.query(
+      'INSERT INTO users (username, password_hash, name, role) VALUES (?, ?, ?, ?)',
+      [username, hashedPassword, name, role]
+    );
+    
+    res.status(201).json({
+      id: String(result.insertId),
+      username,
+      name,
+      role,
+      createdAt: new Date()
+    });
+  } catch (error) {
+    if (error.code === 'ER_DUP_ENTRY') {
+      res.status(400).json({ message: 'Username already exists' });
+    } else {
+      res.status(500).json({ message: 'Server error', error: error.message });
+    }
+  }
+});
+
+app.put('/api/users/:id', authenticateToken, async (req, res) => {
+  if (req.user.role !== 'admin') {
+    return res.status(403).json({ message: 'Admin access required' });
+  }
+  try {
+    const { name, role } = req.body;
+    const userId = req.params.id;
+    
+    if (!name || !role) {
+      return res.status(400).json({ message: 'Name and role are required' });
+    }
+    
+    const pool = getPool();
+    await pool.query(
+      'UPDATE users SET name = ?, role = ? WHERE id = ?',
+      [name, role, userId]
+    );
+    
+    res.json({ message: 'User updated successfully' });
+  } catch (error) {
+    res.status(500).json({ message: 'Server error', error: error.message });
+  }
+});
+
+app.put('/api/users/:id/password', authenticateToken, async (req, res) => {
+  if (req.user.role !== 'admin') {
+    return res.status(403).json({ message: 'Admin access required' });
+  }
+  try {
+    const { password } = req.body;
+    const userId = req.params.id;
+    
+    if (!password || password.length < 6) {
+      return res.status(400).json({ message: 'Password must be at least 6 characters long' });
+    }
+    
+    const pool = getPool();
+    const hashedPassword = await bcrypt.hash(password, 10);
+    await pool.query(
+      'UPDATE users SET password_hash = ? WHERE id = ?',
+      [hashedPassword, userId]
+    );
+    
+    res.json({ message: 'Password updated successfully' });
+  } catch (error) {
+    res.status(500).json({ message: 'Server error', error: error.message });
+  }
+});
+
+app.delete('/api/users/:id', authenticateToken, async (req, res) => {
+  if (req.user.role !== 'admin') {
+    return res.status(403).json({ message: 'Admin access required' });
+  }
+  try {
+    const userId = req.params.id;
+    
+    // Prevent admin from deleting themselves
+    if (userId === req.user.id) {
+      return res.status(400).json({ message: 'You cannot delete your own account' });
+    }
+    
+    const pool = getPool();
+    await pool.query('DELETE FROM users WHERE id = ?', [userId]);
+    
+    res.json({ message: 'User deleted successfully' });
+  } catch (error) {
+    res.status(500).json({ message: 'Server error', error: error.message });
+  }
+});
+
 // Products Routes
 app.get('/api/products', authenticateToken, async (req, res) => {
   try {
     const { category } = req.query;
     const pool = getPool();
-    let sql = 'SELECT id, name, category, price, stock, has_stock AS hasStock, low_stock_threshold AS lowStockThreshold, description, image_url AS imageUrl, metadata, option_schema AS optionSchema FROM products';
+    let sql = 'SELECT id, name, category, price, price_khr AS priceKhr, stock, has_stock AS hasStock, low_stock_threshold AS lowStockThreshold, description, image_url AS imageUrl, metadata, option_schema AS optionSchema FROM products';
     const params = [];
     if (category) {
       sql += ' WHERE category = ?';
@@ -590,12 +917,13 @@ app.post('/api/products', authenticateToken, async (req, res) => {
       await conn.beginTransaction();
       const metadata = req.body.metadata ? JSON.stringify(req.body.metadata) : null;
       const [result] = await conn.query(
-        `INSERT INTO products (name, category, price, stock, has_stock, low_stock_threshold, description, image_url, metadata, option_schema)
-         VALUES (?,?,?,?,?,?,?,?,?,NULL)`,
+        `INSERT INTO products (name, category, price, price_khr, stock, has_stock, low_stock_threshold, description, image_url, metadata, option_schema)
+         VALUES (?,?,?,?,?,?,?,?,?,?,NULL)`,
         [
           req.body.name,
           req.body.category,
           req.body.price,
+          req.body.priceKhr || null,
           req.body.stock,
           req.body.hasStock !== undefined ? req.body.hasStock : true,
           req.body.lowStockThreshold,
@@ -606,11 +934,7 @@ app.post('/api/products', authenticateToken, async (req, res) => {
       );
       const insertedId = result.insertId;
 
-      // Ensure category exists in user_categories
-      await conn.query(
-        'INSERT IGNORE INTO user_categories (user_id, name) VALUES (?,?)',
-        [Number(req.user.id), req.body.category]
-      );
+      // Category will be created by user if needed
 
       // Persist option schema relationally if provided
       if (Array.isArray(req.body.optionSchema) && req.body.optionSchema.length) {
@@ -681,7 +1005,7 @@ app.put('/api/products/:id', authenticateToken, async (req, res) => {
       }
 
       // 2) Update base fields
-      const map = { name:'name', category:'category', price:'price', stock:'stock', hasStock:'has_stock', lowStockThreshold:'low_stock_threshold', description:'description', imageUrl:'image_url' };
+      const map = { name:'name', category:'category', price:'price', priceKhr:'price_khr', stock:'stock', hasStock:'has_stock', lowStockThreshold:'low_stock_threshold', description:'description', imageUrl:'image_url' };
       const fields = [], values = [];
       for (const [k, col] of Object.entries(map)) {
         if (req.body[k] !== undefined) { fields.push(`${col} = ?`); values.push(req.body[k]); }
@@ -692,13 +1016,7 @@ app.put('/api/products/:id', authenticateToken, async (req, res) => {
         await conn.query(`UPDATE products SET ${fields.join(', ')} WHERE id = ?`, values);
       }
 
-      // Ensure category exists in user_categories if category was updated
-      if (req.body.category !== undefined) {
-        await conn.query(
-          'INSERT IGNORE INTO user_categories (user_id, name) VALUES (?,?)',
-          [Number(req.user.id), req.body.category]
-        );
-      }
+      // Category will be created by user if needed
 
       // 3) Upsert option groups/values, then prune obsolete ones
       const schema = Array.isArray(req.body.optionSchema) ? req.body.optionSchema : null;
@@ -937,8 +1255,8 @@ app.post('/api/transactions', authenticateToken, async (req, res) => {
     }
 
     const [result] = await conn.query(
-      `INSERT INTO transactions (subtotal, discount, total, payment_method, cash_received, change_back, status, date, user_id, customer_id, loyalty_points_used, loyalty_points_earned)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+      `INSERT INTO transactions (subtotal, discount, total, payment_method, cash_received, change_back, status, date, customer_id, loyalty_points_used, loyalty_points_earned)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
       [
         subtotal,
         discount,
@@ -948,7 +1266,6 @@ app.post('/api/transactions', authenticateToken, async (req, res) => {
         changeBack,
         status,
         now,
-        Number(req.user.id),
         req.body.customerId ? Number(req.body.customerId) : null,
         req.body.loyaltyPointsUsed || 0,
         req.body.loyaltyPointsEarned || 0
@@ -986,33 +1303,29 @@ app.post('/api/transactions', authenticateToken, async (req, res) => {
       }
     }
 
-    // Auto-create income entry for paid transactions
-    if (status === 'paid') {
-      // Ensure 'Sales' income category exists
-      await conn.query(
-        `INSERT IGNORE INTO income_categories (user_id, name, description, color)
-         VALUES (?,?,?,?)`,
-        [Number(req.user.id), 'Sales', 'Point of Sale transactions', '#10B981']
-      );
-      
-      // Get the income category ID
-      const [incomeCategoryResult] = await conn.query(
-        'SELECT id FROM income_categories WHERE user_id = ? AND name = ?',
-        [Number(req.user.id), 'Sales']
-      );
-      
-      if (incomeCategoryResult.length > 0) {
-        await conn.query(
-          `INSERT INTO income_expenses (type, category, description, amount, date, user_id, income_category_id)
-           VALUES (?,?,?,?,?,?,?)`,
-          ['income', 'Sales', `POS Sale #${txId}`, total, now, Number(req.user.id), incomeCategoryResult[0].id]
+      // Auto-create income entry for paid transactions
+      if (status === 'paid') {
+        // Check if 'Sales' income category exists
+        const [incomeCategoryResult] = await conn.query(
+          'SELECT id FROM income_categories WHERE name = ?',
+          ['Sales']
         );
+        
+        if (incomeCategoryResult.length > 0) {
+          const incomeDescription = req.body.description
+            ? String(req.body.description)
+            : (req.body.orderId ? `Order #${req.body.orderId} Payment` : `POS Sale #${txId}`);
+          await conn.query(
+            `INSERT INTO income_expenses (type, category, description, amount, date, income_category_id)
+             VALUES (?,?,?,?,?,?)`,
+            ['income', 'Sales', incomeDescription, total, now, incomeCategoryResult[0].id]
+          );
+        }
       }
-    }
 
       console.log('Committing transaction...');
       await conn.commit();
-      console.log('Transaction completed successfully with ID:', txId);
+      console.log('Transaction completed successfully with ID:', txId, 'status:', status, 'method:', method);
       res.status(201).json({ id: String(txId), ...req.body, status, cashReceived, changeBack, date: now });
       conn.release();
       return; // Success, exit retry loop
@@ -1040,7 +1353,7 @@ app.post('/api/transactions', authenticateToken, async (req, res) => {
   }
 });
 
-// Income/Expense Routes
+// Income/Expense Routes (shared across all users)
 app.get('/api/income-expenses', authenticateToken, async (req, res) => {
   try {
     const { startDate, endDate, type, category } = req.query;
@@ -1051,14 +1364,22 @@ app.get('/api/income-expenses', authenticateToken, async (req, res) => {
                FROM income_expenses ie
                LEFT JOIN expense_categories ec ON ie.category_id = ec.id
                LEFT JOIN income_categories ic ON ie.income_category_id = ic.id
-               WHERE ie.user_id = ?`;
-    const params = [Number(req.user.id)];
-    if (startDate && endDate) { sql += ' AND date BETWEEN ? AND ?'; params.push(startDate, endDate); }
+               WHERE 1=1`;
+    const params = [];
+    if (startDate && endDate) {
+      // Normalize to full day range to avoid timezone cutoffs
+      const start = new Date(String(startDate));
+      const end = new Date(String(endDate));
+      const startIso = new Date(Date.UTC(start.getFullYear(), start.getMonth(), start.getDate(), 0, 0, 0)).toISOString();
+      const endIso = new Date(Date.UTC(end.getFullYear(), end.getMonth(), end.getDate(), 23, 59, 59, 999)).toISOString();
+      sql += ' AND date BETWEEN ? AND ?';
+      params.push(startIso, endIso);
+    }
     if (type) { sql += ' AND type = ?'; params.push(type); }
     if (category) { sql += ' AND category = ?'; params.push(category); }
     sql += ' ORDER BY date DESC';
     const [rows] = await pool.query(sql, params);
-    rows.forEach(r => (r.id = String(r.id)));
+    rows.forEach(r => { r.id = String(r.id); r.date = new Date(r.date).toISOString(); });
     res.json(rows);
   } catch (error) {
     res.status(500).json({ message: 'Server error', error: error.message });
@@ -1081,9 +1402,9 @@ app.post('/api/income-expenses', authenticateToken, async (req, res) => {
     }
     
     const [result] = await pool.query(
-      `INSERT INTO income_expenses (type, category, category_id, income_category_id, description, amount, date, user_id)
-       VALUES (?,?,?,?,?,?,?,?)`,
-      [req.body.type, req.body.category, categoryId, incomeCategoryId, req.body.description || null, req.body.amount, date, Number(req.user.id)]
+      `INSERT INTO income_expenses (type, category, category_id, income_category_id, description, amount, date)
+       VALUES (?,?,?,?,?,?,?)`,
+      [req.body.type, req.body.category, categoryId, incomeCategoryId, req.body.description || null, req.body.amount, date]
     );
     res.status(201).json({ id: String(result.insertId), ...req.body, date });
   } catch (error) {
@@ -1091,18 +1412,18 @@ app.post('/api/income-expenses', authenticateToken, async (req, res) => {
   }
 });
 
-// Orders Routes
+// Orders Routes (shared across all users)
 app.get('/api/orders', authenticateToken, async (req, res) => {
   try {
     const pool = getPool();
     const [rows] = await pool.query(
       `SELECT id, customer_id AS customerId, items, total, created_at AS createdAt, table_number AS tableNumber, notes, metadata, payment_status AS paymentStatus, payment_method AS paymentMethod
-       FROM orders WHERE user_id = ? ORDER BY created_at DESC`,
-      [Number(req.user.id)]
+       FROM orders ORDER BY created_at DESC`
     );
     const normalized = rows.map(r => ({
       ...r,
       id: String(r.id),
+      createdAt: r.createdAt ? new Date(r.createdAt).toISOString() : null,
       items: safeJsonParse(r.items, []),
       metadata: safeJsonParse(r.metadata, {}),
     }));
@@ -1113,17 +1434,50 @@ app.get('/api/orders', authenticateToken, async (req, res) => {
 });
 
 app.post('/api/orders', authenticateToken, async (req, res) => {
+  const pool = getPool();
+  const conn = await pool.getConnection();
   try {
-    const pool = getPool();
-    const createdAt = new Date();
-    const [result] = await pool.query(
-      `INSERT INTO orders (customer_id, items, total, created_at, table_number, notes, metadata, user_id)
-       VALUES (?,?,?,?,?,?,?,?)`,
-      [req.body.customerId ? Number(req.body.customerId) : null, JSON.stringify(req.body.items || []), req.body.total, createdAt, req.body.tableNumber || null, req.body.notes || null, req.body.metadata ? JSON.stringify(req.body.metadata) : null, Number(req.user.id)]
+    await conn.beginTransaction();
+    const createdAt = new Date(); // store UTC; client will localize
+    
+    // Decrease stock for all items in the order
+    const items = req.body.items || [];
+    const productIds = [];
+    
+    // Collect all product IDs and validate stock
+    for (const item of items) {
+      if (item.productId) {
+        productIds.push(Number(item.productId));
+      }
+    }
+    
+    // Lock all products at once to prevent deadlocks
+    if (productIds.length > 0) {
+      const placeholders = productIds.map(() => '?').join(',');
+      await conn.query(`SELECT id FROM products WHERE id IN (${placeholders}) AND has_stock = 1 FOR UPDATE`, productIds);
+    }
+    
+    // Decrease stock for each product
+    for (const item of items) {
+      if (item.productId) {
+        await conn.query('UPDATE products SET stock = stock - ? WHERE id = ? AND has_stock = 1', [item.quantity, Number(item.productId)]);
+      }
+    }
+    
+    // Create the order
+    const [result] = await conn.query(
+      `INSERT INTO orders (customer_id, items, total, created_at, table_number, notes, metadata)
+       VALUES (?,?,?,?,?,?,?)`,
+      [req.body.customerId ? Number(req.body.customerId) : null, JSON.stringify(items), req.body.total, createdAt, req.body.tableNumber || null, req.body.notes || null, req.body.metadata ? JSON.stringify(req.body.metadata) : null]
     );
+    
+    await conn.commit();
     res.status(201).json({ id: String(result.insertId), ...req.body, createdAt });
   } catch (error) {
+    await conn.rollback();
     res.status(500).json({ message: 'Server error', error: error.message });
+  } finally {
+    conn.release();
   }
 });
 
@@ -1133,7 +1487,7 @@ app.put('/api/orders/:id', authenticateToken, async (req, res) => {
     const pool = getPool();
     const fields = [];
     const values = [];
-    const mapping = { customerId: 'customer_id', items: 'items', total: 'total', tableNumber: 'table_number', notes: 'notes', metadata: 'metadata' };
+    const mapping = { customerId: 'customer_id', items: 'items', total: 'total', notes: 'notes', metadata: 'metadata' };
     for (const [key, col] of Object.entries(mapping)) {
       if (req.body[key] !== undefined) {
         let v = req.body[key];
@@ -1153,12 +1507,13 @@ app.put('/api/orders/:id', authenticateToken, async (req, res) => {
 
 // Update order payment status and method
 app.put('/api/orders/:id/payment', authenticateToken, async (req, res) => {
+  console.log('Order payment update called for order:', req.params.id, 'status:', req.body.paymentStatus);
   const pool = getPool();
   const conn = await pool.getConnection();
   try {
     await conn.beginTransaction();
     
-    const { paymentStatus, paymentMethod, discount = 0, cashReceived } = req.body;
+    const { paymentStatus, paymentMethod, discount = 0, cashReceived, suppressIncome } = req.body;
     const orderId = req.params.id;
     
     // Get the order details
@@ -1195,6 +1550,7 @@ app.put('/api/orders/:id/payment', authenticateToken, async (req, res) => {
     
     // If payment is completed, create a transaction record
     if (paymentStatus === 'paid') {
+      console.log('Creating transaction for paid order:', orderId);
       const total = Number(order.total) - Number(discount);
       const now = new Date();
       
@@ -1204,8 +1560,8 @@ app.put('/api/orders/:id/payment', authenticateToken, async (req, res) => {
       }
       
       const [txResult] = await conn.query(
-        `INSERT INTO transactions (subtotal, discount, total, payment_method, cash_received, change_back, status, date, user_id, customer_id, loyalty_points_used, loyalty_points_earned)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+        `INSERT INTO transactions (subtotal, discount, total, payment_method, cash_received, change_back, status, date, customer_id, loyalty_points_used, loyalty_points_earned)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
         [
           Number(order.total),
           Number(discount),
@@ -1215,13 +1571,13 @@ app.put('/api/orders/:id/payment', authenticateToken, async (req, res) => {
           changeBack,
           'paid',
           now,
-          Number(req.user.id),
           order.customer_id,
           0, // loyalty points used
           0  // loyalty points earned
         ]
       );
       const txId = txResult.insertId;
+      console.log('Transaction created with ID:', txId);
       
       // Parse order items and create transaction items
       const items = safeJsonParse(order.items, []);
@@ -1236,23 +1592,35 @@ app.put('/api/orders/:id/payment', authenticateToken, async (req, res) => {
       // Create income entry for paid orders
       // Ensure 'Sales' income category exists
       await conn.query(
-        `INSERT IGNORE INTO income_categories (user_id, name, description, color)
-         VALUES (?,?,?,?)`,
-        [Number(req.user.id), 'Sales', 'Point of Sale transactions', '#10B981']
+        `INSERT IGNORE INTO income_categories (name, description, color)
+         VALUES (?,?,?)`,
+        ['Sales', 'Point of Sale transactions', '#10B981']
       );
       
       // Get the income category ID
       const [incomeCategoryResult] = await conn.query(
-        'SELECT id FROM income_categories WHERE user_id = ? AND name = ?',
-        [Number(req.user.id), 'Sales']
+        'SELECT id FROM income_categories WHERE name = ?',
+        ['Sales']
       );
-      
-      if (incomeCategoryResult.length > 0) {
+
+      // Ensure we only create one income entry per order payment
+      const incomeDescription = `Order #${orderId} Payment`;
+      const [existingIncome] = await conn.query(
+        'SELECT id FROM income_expenses WHERE description = ? LIMIT 1',
+        [incomeDescription]
+      );
+
+      if (incomeCategoryResult.length > 0 && (!existingIncome || existingIncome.length === 0)) {
+        // Create income unless it already exists (suppressIncome flag becomes advisory)
+        console.log('Creating income entry for order:', orderId, 'amount:', total);
         await conn.query(
-          `INSERT INTO income_expenses (type, category, description, amount, date, user_id, income_category_id)
-           VALUES (?,?,?,?,?,?,?)`,
-          ['income', 'Sales', `Order #${orderId} Payment`, total, now, Number(req.user.id), incomeCategoryResult[0].id]
+          `INSERT INTO income_expenses (type, category, description, amount, date, income_category_id)
+           VALUES (?,?,?,?,?,?)`,
+          ['income', 'Sales', incomeDescription, total, now, incomeCategoryResult[0].id]
         );
+        console.log('Income entry created successfully');
+      } else {
+        console.log('Income entry not created - category exists:', incomeCategoryResult.length > 0, 'existing income:', existingIncome?.length || 0);
       }
     }
     
@@ -1266,48 +1634,47 @@ app.put('/api/orders/:id/payment', authenticateToken, async (req, res) => {
   }
 });
 
-// Schemas Routes (per-user, per-type)
-// GET /api/schemas/:userId/:type
-app.get('/api/schemas/:userId/:type', authenticateToken, async (req, res) => {
+// Schemas Routes (shared across all users)
+// GET /api/schemas/:type
+app.get('/api/schemas/:type', authenticateToken, async (req, res) => {
   try {
     const pool = getPool();
-    const { userId, type } = req.params;
-    const [rows] = await pool.query('SELECT user_id AS userId, type, schema_json AS `schema` FROM user_schemas WHERE user_id = ? AND type = ?', [Number(userId), type]);
-    if (!rows[0]) return res.json({ userId, type, schema: [] });
+    const { type } = req.params;
+    const [rows] = await pool.query('SELECT type, schema_json AS `schema` FROM user_schemas WHERE type = ?', [type]);
+    if (!rows[0]) return res.json({ type, schema: [] });
     const entry = rows[0];
     entry.schema = safeJsonParse(entry.schema, []);
-    entry.userId = String(entry.userId);
     res.json(entry);
   } catch (error) {
     res.status(500).json({ message: 'Server error', error: error.message });
   }
 });
 
-// POST /api/schemas/:userId/:type -> upsert schema
-app.post('/api/schemas/:userId/:type', authenticateToken, async (req, res) => {
+// POST /api/schemas/:type -> upsert schema
+app.post('/api/schemas/:type', authenticateToken, async (req, res) => {
   try {
     const pool = getPool();
-    const { userId, type } = req.params;
+    const { type } = req.params;
     const { schema } = req.body;
     if (!Array.isArray(schema)) return res.status(400).json({ message: 'Schema must be an array' });
     // Ensure we store valid JSON text
     const payloadJson = JSON.stringify(schema || []);
     await pool.query(
-      `INSERT INTO user_schemas (user_id, type, schema_json) VALUES (?,?,?)
+      `INSERT INTO user_schemas (type, schema_json) VALUES (?,?)
        ON DUPLICATE KEY UPDATE schema_json = VALUES(schema_json)`,
-      [Number(userId), type, payloadJson]
+      [type, payloadJson]
     );
-    res.json({ userId, type, schema });
+    res.json({ type, schema });
   } catch (error) {
     res.status(500).json({ message: 'Server error', error: error.message });
   }
 });
 
-// Categories Routes (per-user)
+// Categories Routes (shared across all users)
 app.get('/api/categories', authenticateToken, async (req, res) => {
   try {
     const pool = getPool();
-    const [rows] = await pool.query('SELECT name FROM user_categories WHERE user_id = ? ORDER BY name', [Number(req.user.id)]);
+    const [rows] = await pool.query('SELECT name FROM user_categories ORDER BY name');
     res.json(rows.map(r => r.name));
   } catch (error) {
     res.status(500).json({ message: 'Server error', error: error.message });
@@ -1319,8 +1686,8 @@ app.post('/api/categories', authenticateToken, async (req, res) => {
   if (!name || typeof name !== 'string') return res.status(400).json({ message: 'Category name required' });
   try {
     const pool = getPool();
-    await pool.query('INSERT IGNORE INTO user_categories (user_id, name) VALUES (?,?)', [Number(req.user.id), name]);
-    const [rows] = await pool.query('SELECT name FROM user_categories WHERE user_id = ? ORDER BY name', [Number(req.user.id)]);
+    await pool.query('INSERT IGNORE INTO user_categories (name) VALUES (?)', [name]);
+    const [rows] = await pool.query('SELECT name FROM user_categories ORDER BY name');
     res.status(201).json(rows.map(r => r.name));
   } catch (error) {
     res.status(500).json({ message: 'Server error', error: error.message });
@@ -1344,15 +1711,15 @@ app.delete('/api/categories/:name', authenticateToken, async (req, res) => {
       });
     }
     
-    await pool.query('DELETE FROM user_categories WHERE user_id = ? AND name = ?', [Number(req.user.id), categoryName]);
-    const [rows] = await pool.query('SELECT name FROM user_categories WHERE user_id = ? ORDER BY name', [Number(req.user.id)]);
+    await pool.query('DELETE FROM user_categories WHERE name = ?', [categoryName]);
+    const [rows] = await pool.query('SELECT name FROM user_categories ORDER BY name');
     res.json(rows.map(r => r.name));
   } catch (error) {
     res.status(500).json({ message: 'Server error', error: error.message });
   }
 });
 
-// Income Categories Routes (per-user)
+// Income Categories Routes (shared across all users)
 app.get('/api/income-categories', authenticateToken, async (req, res) => {
   try {
     const pool = getPool();
@@ -1360,8 +1727,7 @@ app.get('/api/income-categories', authenticateToken, async (req, res) => {
     try {
       // First try with all columns
       [rows] = await pool.query(
-        'SELECT id, name, description, color, is_active AS isActive, created_at AS createdAt, updated_at AS updatedAt FROM income_categories WHERE user_id = ? ORDER BY name', 
-        [Number(req.user.id)]
+        'SELECT id, name, description, color, is_active AS isActive, created_at AS createdAt, updated_at AS updatedAt FROM income_categories ORDER BY name'
       );
     } catch (e) {
       // If table doesn't exist, return empty array
@@ -1389,8 +1755,8 @@ app.post('/api/income-categories', authenticateToken, async (req, res) => {
     try {
       // First try with all columns
       [result] = await pool.query(
-        'INSERT INTO income_categories (user_id, name, description, color, is_active) VALUES (?, ?, ?, ?, ?)',
-        [Number(req.user.id), name, description || null, color || '#10B981', 1]
+        'INSERT INTO income_categories (name, description, color, is_active) VALUES (?, ?, ?, ?)',
+        [name, description || null, color || '#10B981', 1]
       );
       
       [rows] = await pool.query(
@@ -1427,10 +1793,10 @@ app.put('/api/income-categories/:id', authenticateToken, async (req, res) => {
   try {
     const pool = getPool();
     
-    // Check if category belongs to user
+    // Check if category exists
     const [existing] = await pool.query(
-      'SELECT id FROM income_categories WHERE id = ? AND user_id = ?',
-      [categoryId, Number(req.user.id)]
+      'SELECT id FROM income_categories WHERE id = ?',
+      [categoryId]
     );
     
     if (existing.length === 0) {
@@ -1441,8 +1807,8 @@ app.put('/api/income-categories/:id', authenticateToken, async (req, res) => {
     try {
       // First try with all columns
       await pool.query(
-        'UPDATE income_categories SET name = ?, description = ?, color = ?, is_active = ? WHERE id = ? AND user_id = ?',
-        [name, description || null, color || '#10B981', isActive !== undefined ? isActive : 1, categoryId, Number(req.user.id)]
+        'UPDATE income_categories SET name = ?, description = ?, color = ?, is_active = ? WHERE id = ?',
+        [name, description || null, color || '#10B981', isActive !== undefined ? isActive : 1, categoryId]
       );
       
       [rows] = await pool.query(
@@ -1487,24 +1853,24 @@ app.delete('/api/income-categories/:id', authenticateToken, async (req, res) => 
       });
     }
     
-    // Check if category belongs to user
+    // Check if category exists
     const [existing] = await pool.query(
-      'SELECT id FROM income_categories WHERE id = ? AND user_id = ?',
-      [categoryId, Number(req.user.id)]
+      'SELECT id FROM income_categories WHERE id = ?',
+      [categoryId]
     );
     
     if (existing.length === 0) {
       return res.status(404).json({ message: 'Category not found' });
     }
     
-    await pool.query('DELETE FROM income_categories WHERE id = ? AND user_id = ?', [categoryId, Number(req.user.id)]);
+    await pool.query('DELETE FROM income_categories WHERE id = ?', [categoryId]);
     res.json({ message: 'Category deleted successfully' });
   } catch (error) {
     res.status(500).json({ message: 'Server error', error: error.message });
   }
 });
 
-// Expense Categories Routes (per-user)
+// Expense Categories Routes (shared across all users)
 app.get('/api/expense-categories', authenticateToken, async (req, res) => {
   try {
     const pool = getPool();
@@ -1512,15 +1878,13 @@ app.get('/api/expense-categories', authenticateToken, async (req, res) => {
     try {
       // First try with all columns
       [rows] = await pool.query(
-        'SELECT id, name, description, color, is_active AS isActive, created_at AS createdAt, updated_at AS updatedAt FROM expense_categories WHERE user_id = ? ORDER BY name', 
-        [Number(req.user.id)]
+        'SELECT id, name, description, color, is_active AS isActive, created_at AS createdAt, updated_at AS updatedAt FROM expense_categories ORDER BY name'
       );
     } catch (e) {
       // If columns don't exist, try with minimal columns
       if (e.code === 'ER_BAD_FIELD_ERROR' && (e.sqlMessage.includes('description') || e.sqlMessage.includes('is_active'))) {
         [rows] = await pool.query(
-          'SELECT id, name, color, created_at AS createdAt FROM expense_categories WHERE user_id = ? ORDER BY name', 
-          [Number(req.user.id)]
+          'SELECT id, name, color, created_at AS createdAt FROM expense_categories ORDER BY name'
         );
         // Add missing fields for compatibility
         rows = rows.map(row => ({ 
@@ -1551,8 +1915,8 @@ app.post('/api/expense-categories', authenticateToken, async (req, res) => {
     try {
       // First try with all columns
       [result] = await pool.query(
-        'INSERT INTO expense_categories (user_id, name, description, color, is_active) VALUES (?, ?, ?, ?, ?)',
-        [Number(req.user.id), name, description || null, color || '#3B82F6', 1]
+        'INSERT INTO expense_categories (name, description, color, is_active) VALUES (?, ?, ?, ?)',
+        [name, description || null, color || '#3B82F6', 1]
       );
       
       [rows] = await pool.query(
@@ -1563,8 +1927,8 @@ app.post('/api/expense-categories', authenticateToken, async (req, res) => {
       // If columns don't exist, try with minimal columns
       if (e.code === 'ER_BAD_FIELD_ERROR' && (e.sqlMessage.includes('description') || e.sqlMessage.includes('is_active'))) {
         [result] = await pool.query(
-          'INSERT INTO expense_categories (user_id, name, color) VALUES (?, ?, ?)',
-          [Number(req.user.id), name, color || '#3B82F6']
+          'INSERT INTO expense_categories (name, color) VALUES (?, ?)',
+          [name, color || '#3B82F6']
         );
         
         [rows] = await pool.query(
@@ -1604,10 +1968,10 @@ app.put('/api/expense-categories/:id', authenticateToken, async (req, res) => {
   try {
     const pool = getPool();
     
-    // Check if category belongs to user
+    // Check if category exists
     const [existing] = await pool.query(
-      'SELECT id FROM expense_categories WHERE id = ? AND user_id = ?',
-      [categoryId, Number(req.user.id)]
+      'SELECT id FROM expense_categories WHERE id = ?',
+      [categoryId]
     );
     
     if (existing.length === 0) {
@@ -1618,8 +1982,8 @@ app.put('/api/expense-categories/:id', authenticateToken, async (req, res) => {
     try {
       // First try with all columns
       await pool.query(
-        'UPDATE expense_categories SET name = ?, description = ?, color = ?, is_active = ? WHERE id = ? AND user_id = ?',
-        [name, description || null, color || '#3B82F6', isActive !== undefined ? isActive : 1, categoryId, Number(req.user.id)]
+        'UPDATE expense_categories SET name = ?, description = ?, color = ?, is_active = ? WHERE id = ?',
+        [name, description || null, color || '#3B82F6', isActive !== undefined ? isActive : 1, categoryId]
       );
       
       [rows] = await pool.query(
@@ -1630,8 +1994,8 @@ app.put('/api/expense-categories/:id', authenticateToken, async (req, res) => {
       // If columns don't exist, try with minimal columns
       if (e.code === 'ER_BAD_FIELD_ERROR' && (e.sqlMessage.includes('description') || e.sqlMessage.includes('is_active'))) {
         await pool.query(
-          'UPDATE expense_categories SET name = ?, color = ? WHERE id = ? AND user_id = ?',
-          [name, color || '#3B82F6', categoryId, Number(req.user.id)]
+          'UPDATE expense_categories SET name = ?, color = ? WHERE id = ?',
+          [name, color || '#3B82F6', categoryId]
         );
         
         [rows] = await pool.query(
@@ -1679,17 +2043,17 @@ app.delete('/api/expense-categories/:id', authenticateToken, async (req, res) =>
       });
     }
     
-    // Check if category belongs to user
+    // Check if category exists
     const [existing] = await pool.query(
-      'SELECT id FROM expense_categories WHERE id = ? AND user_id = ?',
-      [categoryId, Number(req.user.id)]
+      'SELECT id FROM expense_categories WHERE id = ?',
+      [categoryId]
     );
     
     if (existing.length === 0) {
       return res.status(404).json({ message: 'Category not found' });
     }
     
-    await pool.query('DELETE FROM expense_categories WHERE id = ? AND user_id = ?', [categoryId, Number(req.user.id)]);
+    await pool.query('DELETE FROM expense_categories WHERE id = ?', [categoryId]);
     res.json({ message: 'Category deleted successfully' });
   } catch (error) {
     res.status(500).json({ message: 'Server error', error: error.message });
@@ -1792,10 +2156,6 @@ app.get('/api/reports/sales-summary', authenticateToken, async (req, res) => {
       orderWhere = 'WHERE YEAR(created_at) = YEAR(CURDATE()) AND MONTH(created_at) = MONTH(CURDATE())';
     }
 
-    const [txRows] = await pool.query(
-      `SELECT total, status, date FROM transactions ${txWhere}`,
-      txParams
-    );
     const [ieRows] = await pool.query(
       `SELECT type, amount, category, date FROM income_expenses ${ieWhere}`,
       ieParams
@@ -1804,89 +2164,24 @@ app.get('/api/reports/sales-summary', authenticateToken, async (req, res) => {
       `SELECT total, created_at AS createdAt FROM orders ${orderWhere}`,
       orderParams
     );
-
-    // Get detailed item sales data
-    let itemWhere = txWhere.replace('date', 't.date');
-    let itemParams = txParams;
-    if (!itemWhere) {
-      if (period === 'daily') {
-        itemWhere = 'WHERE DATE(t.date) = CURDATE()';
-        itemParams = [];
-      } else {
-        itemWhere = 'WHERE YEAR(t.date) = YEAR(CURDATE()) AND MONTH(t.date) = MONTH(CURDATE())';
-        itemParams = [];
-      }
-    }
-
-    // Category filter for items
-    let categoryFilter = '';
-    if (category) {
-      categoryFilter = ' AND p.category = ?';
-      itemParams.push(category);
-    }
-
-    const [itemsRows] = await pool.query(`
-      SELECT 
-        ti.product_name AS productName,
-        ti.product_id AS productId,
-        p.category,
-        SUM(ti.quantity) AS totalQuantity,
-        SUM(ti.quantity * ti.price) AS totalRevenue,
-        AVG(ti.price) AS avgPrice,
-        COUNT(DISTINCT t.id) AS orderCount
-      FROM transaction_items ti
-      JOIN transactions t ON ti.transaction_id = t.id
-      LEFT JOIN products p ON ti.product_id = p.id
-      ${itemWhere}${categoryFilter}
-      GROUP BY ti.product_id, ti.product_name
-      ORDER BY totalQuantity DESC
-    `, itemParams);
-
-    // Get category breakdown
-    const [categoryRows] = await pool.query(`
-      SELECT 
-        COALESCE(p.category, 'Unknown') AS category,
-        SUM(ti.quantity) AS totalQuantity,
-        SUM(ti.quantity * ti.price) AS totalRevenue,
-        COUNT(DISTINCT ti.product_id) AS uniqueProducts
-      FROM transaction_items ti
-      JOIN transactions t ON ti.transaction_id = t.id
-      LEFT JOIN products p ON ti.product_id = p.id
-      ${itemWhere}
-      GROUP BY p.category
-      ORDER BY totalRevenue DESC
-    `, txParams);
-
-    // Get hourly sales data for the period
-    const [hourlyRows] = await pool.query(`
-      SELECT 
-        HOUR(t.date) AS hour,
-        COUNT(*) AS transactionCount,
-        SUM(t.total) AS revenue,
-        SUM(ti.quantity) AS itemsSold
-      FROM transactions t
-      LEFT JOIN transaction_items ti ON t.id = ti.transaction_id
-      ${txWhere}
-      GROUP BY HOUR(t.date)
-      ORDER BY hour
-    `, txParams);
-
-    const totalRevenue = txRows.reduce((sum, t) => sum + Number(t.total), 0);
+    // Compute dashboard metrics solely from income_expenses
+    const incomeSum = ieRows.filter(ie => ie.type === 'income').reduce((sum, ie) => sum + Number(ie.amount), 0);
+    const additionalIncome = incomeSum;
     const totalExpenses = ieRows.filter(ie => ie.type === 'expense').reduce((sum, ie) => sum + Number(ie.amount), 0);
-    const additionalIncome = ieRows.filter(ie => ie.type === 'income').reduce((sum, ie) => sum + Number(ie.amount), 0);
-    const totalIncome = totalRevenue + additionalIncome;
+    const totalRevenue = incomeSum; // treat all income as revenue for dashboard
+    const totalIncome = incomeSum;
     const netProfit = totalIncome - totalExpenses;
 
-    const transactionCount = txRows.length;
-    const paidTransactionCount = txRows.filter(t => t.status === 'paid').length;
-    const unpaidTransactionCount = txRows.filter(t => t.status === 'unpaid').length;
+    const transactionCount = 0; // dashboard no longer uses transactions
+    const paidTransactionCount = 0;
+    const unpaidTransactionCount = 0;
 
     const orderCount = orderRows.length;
     const orderTotal = orderRows.reduce((sum, o) => sum + Number(o.total), 0);
 
-    // Calculate total items sold
-    const totalItemsSold = itemsRows.reduce((sum, item) => sum + Number(item.totalQuantity), 0);
-    const averageOrderValue = transactionCount > 0 ? totalRevenue / transactionCount : 0;
+    // Dashboard does not use itemized sales when transactions are ignored
+    const totalItemsSold = 0;
+    const averageOrderValue = 0;
 
     // Breakdowns
     const incomeByCategory = ieRows
@@ -1920,30 +2215,481 @@ app.get('/api/reports/sales-summary', authenticateToken, async (req, res) => {
       averageOrderValue,
       incomeByCategory,
       expenseByCategory,
-      itemsSold: itemsRows.map(item => ({
-        productName: item.productName,
-        productId: item.productId ? String(item.productId) : null,
-        category: item.category,
-        quantity: Number(item.totalQuantity),
-        revenue: Number(item.totalRevenue),
-        avgPrice: Number(item.avgPrice),
-        orderCount: Number(item.orderCount)
-      })),
-      categoryBreakdown: categoryRows.map(cat => ({
-        category: cat.category,
-        quantity: Number(cat.totalQuantity),
-        revenue: Number(cat.totalRevenue),
-        uniqueProducts: Number(cat.uniqueProducts)
-      })),
-      hourlyData: hourlyRows.map(hour => ({
-        hour: Number(hour.hour),
-        transactionCount: Number(hour.transactionCount),
-        revenue: Number(hour.revenue),
-        itemsSold: Number(hour.itemsSold)
-      }))
+      itemsSold: [],
+      categoryBreakdown: [],
+      hourlyData: []
     });
   } catch (error) {
     res.status(500).json({ message: 'Server error', error: error.message });
+  }
+});
+
+// Get top selling items report
+app.get('/api/reports/top-selling-items', authenticateToken, async (req, res) => {
+  try {
+    const { period, startDate: qsStart, endDate: qsEnd, limit = 50 } = req.query;
+    const now = moment();
+    let startDate, endDate;
+    
+    if (qsStart && qsEnd) {
+      startDate = moment(qsStart);
+      endDate = moment(qsEnd);
+    } else if (period === 'daily') {
+      startDate = now.clone().startOf('day');
+      endDate = now.clone().endOf('day');
+    } else if (period === 'monthly') {
+      startDate = now.clone().startOf('month');
+      endDate = now.clone().endOf('month');
+    } else {
+      startDate = now.clone().startOf('month');
+      endDate = now.clone().endOf('month');
+    }
+
+    const pool = getPool();
+    const [rows] = await pool.query(`
+      SELECT 
+        oi.product_name as productName,
+        oi.product_id as productId,
+        oi.category,
+        SUM(oi.quantity) as totalQuantity,
+        SUM(oi.quantity * oi.price) as totalRevenue,
+        AVG(oi.price) as avgPrice,
+        COUNT(DISTINCT o.id) as orderCount
+      FROM order_items oi
+      JOIN orders o ON oi.order_id = o.id
+      WHERE o.created_at BETWEEN ? AND ?
+        AND o.payment_status = 'paid'
+      GROUP BY oi.product_id, oi.product_name, oi.category
+      ORDER BY totalQuantity DESC
+      LIMIT ?
+    `, [startDate.format('YYYY-MM-DD HH:mm:ss'), endDate.format('YYYY-MM-DD HH:mm:ss'), parseInt(limit)]);
+
+    res.json({
+      period: period || 'custom',
+      startDate: startDate.format('YYYY-MM-DD'),
+      endDate: endDate.format('YYYY-MM-DD'),
+      items: rows
+    });
+  } catch (error) {
+    res.status(500).json({ message: 'Server error', error: error.message });
+  }
+});
+
+// Get income/expense trends chart data
+app.get('/api/reports/income-expense-trends', authenticateToken, async (req, res) => {
+  try {
+    const { period, startDate: qsStart, endDate: qsEnd, groupBy = 'day' } = req.query;
+    const now = moment();
+    let startDate, endDate;
+    
+    if (qsStart && qsEnd) {
+      startDate = moment(qsStart);
+      endDate = moment(qsEnd);
+    } else if (period === 'daily') {
+      startDate = now.clone().startOf('day');
+      endDate = now.clone().endOf('day');
+    } else if (period === 'monthly') {
+      startDate = now.clone().startOf('month');
+      endDate = now.clone().endOf('month');
+    } else {
+      startDate = now.clone().subtract(30, 'days');
+      endDate = now.clone();
+    }
+
+    let dateFormat, groupByClause;
+    if (groupBy === 'hour') {
+      dateFormat = '%Y-%m-%d %H:00:00';
+      groupByClause = 'DATE_FORMAT(date, "%Y-%m-%d %H:00:00")';
+    } else if (groupBy === 'week') {
+      dateFormat = '%Y-%u';
+      groupByClause = 'YEARWEEK(date)';
+    } else if (groupBy === 'month') {
+      dateFormat = '%Y-%m';
+      groupByClause = 'DATE_FORMAT(date, "%Y-%m")';
+    } else {
+      dateFormat = '%Y-%m-%d';
+      groupByClause = 'DATE(date)';
+    }
+
+    const pool = getPool();
+    const [rows] = await pool.query(`
+      SELECT 
+        ${groupByClause} as period,
+        SUM(CASE WHEN type = 'income' THEN amount ELSE 0 END) as income,
+        SUM(CASE WHEN type = 'expense' THEN amount ELSE 0 END) as expense,
+        COUNT(CASE WHEN type = 'income' THEN 1 END) as incomeCount,
+        COUNT(CASE WHEN type = 'expense' THEN 1 END) as expenseCount
+      FROM income_expenses
+      WHERE date BETWEEN ? AND ?
+      GROUP BY ${groupByClause}
+      ORDER BY period ASC
+    `, [startDate.format('YYYY-MM-DD HH:mm:ss'), endDate.format('YYYY-MM-DD HH:mm:ss')]);
+
+    res.json({
+      period: period || 'custom',
+      groupBy,
+      startDate: startDate.format('YYYY-MM-DD'),
+      endDate: endDate.format('YYYY-MM-DD'),
+      trends: rows
+    });
+  } catch (error) {
+    res.status(500).json({ message: 'Server error', error: error.message });
+  }
+});
+
+// Get all orders report
+app.get('/api/reports/orders', authenticateToken, async (req, res) => {
+  try {
+    const { 
+      period, 
+      startDate: qsStart, 
+      endDate: qsEnd, 
+      status, 
+      paymentStatus, 
+      page = 1, 
+      limit = 100,
+      sortBy = 'created_at',
+      sortOrder = 'desc'
+    } = req.query;
+    
+    const now = moment();
+    let startDate, endDate;
+    
+    if (qsStart && qsEnd) {
+      startDate = moment(qsStart);
+      endDate = moment(qsEnd);
+    } else if (period === 'daily') {
+      startDate = now.clone().startOf('day');
+      endDate = now.clone().endOf('day');
+    } else if (period === 'monthly') {
+      startDate = now.clone().startOf('month');
+      endDate = now.clone().endOf('month');
+    } else {
+      startDate = now.clone().subtract(30, 'days');
+      endDate = now.clone();
+    }
+
+    let whereClause = 'WHERE o.created_at BETWEEN ? AND ?';
+    let params = [startDate.format('YYYY-MM-DD HH:mm:ss'), endDate.format('YYYY-MM-DD HH:mm:ss')];
+
+    if (status) {
+      whereClause += ' AND o.status = ?';
+      params.push(status);
+    }
+
+    if (paymentStatus) {
+      whereClause += ' AND o.payment_status = ?';
+      params.push(paymentStatus);
+    }
+
+    const offset = (parseInt(page) - 1) * parseInt(limit);
+    const validSortColumns = ['created_at', 'total', 'status', 'payment_status', 'customer_name'];
+    const sortColumn = validSortColumns.includes(sortBy) ? sortBy : 'created_at';
+    const sortDirection = sortOrder.toLowerCase() === 'asc' ? 'ASC' : 'DESC';
+
+    const pool = getPool();
+    // Get total count
+    const [countRows] = await pool.query(`
+      SELECT COUNT(*) as total
+      FROM orders o
+      ${whereClause}
+    `, params);
+
+    // Get orders with pagination
+    const [orderRows] = await pool.query(`
+      SELECT 
+        o.id,
+        o.customer_name as customerName,
+        o.customer_phone as customerPhone,
+        o.items,
+        o.subtotal,
+        o.discount,
+        o.total,
+        o.status,
+        o.payment_status as paymentStatus,
+        o.payment_method as paymentMethod,
+        o.cash_received as cashReceived,
+        o.change_amount as changeAmount,
+        o.created_at as createdAt,
+        o.updated_at as updatedAt
+      FROM orders o
+      ${whereClause}
+      ORDER BY o.${sortColumn} ${sortDirection}
+      LIMIT ? OFFSET ?
+    `, [...params, parseInt(limit), offset]);
+
+    // Get order items for each order
+    const orderIds = orderRows.map(o => o.id);
+    let orderItems = [];
+    if (orderIds.length > 0) {
+      const [itemRows] = await pool.query(`
+        SELECT 
+          order_id as orderId,
+          product_name as productName,
+          product_id as productId,
+          category,
+          quantity,
+          price,
+          total
+        FROM order_items
+        WHERE order_id IN (${orderIds.map(() => '?').join(',')})
+        ORDER BY order_id, id
+      `, orderIds);
+      orderItems = itemRows;
+    }
+
+    // Group items by order
+    const itemsByOrder = orderItems.reduce((acc, item) => {
+      if (!acc[item.orderId]) acc[item.orderId] = [];
+      acc[item.orderId].push(item);
+      return acc;
+    }, {});
+
+    // Add items to orders
+    const ordersWithItems = orderRows.map(order => ({
+      ...order,
+      items: itemsByOrder[order.id] || []
+    }));
+
+    res.json({
+      period: period || 'custom',
+      startDate: startDate.format('YYYY-MM-DD'),
+      endDate: endDate.format('YYYY-MM-DD'),
+      pagination: {
+        page: parseInt(page),
+        limit: parseInt(limit),
+        total: countRows[0].total,
+        totalPages: Math.ceil(countRows[0].total / parseInt(limit))
+      },
+      orders: ordersWithItems
+    });
+  } catch (error) {
+    res.status(500).json({ message: 'Server error', error: error.message });
+  }
+});
+
+// Get comprehensive dashboard data
+app.get('/api/reports/dashboard', authenticateToken, async (req, res) => {
+  try {
+    const { period = 'daily' } = req.query;
+    const now = moment();
+    let startDate, endDate;
+    
+    if (period === 'daily') {
+      startDate = now.clone().startOf('day');
+      endDate = now.clone().endOf('day');
+    } else if (period === 'monthly') {
+      startDate = now.clone().startOf('month');
+      endDate = now.clone().endOf('month');
+    } else {
+      startDate = now.clone().subtract(30, 'days');
+      endDate = now.clone();
+    }
+
+    const pool = getPool();
+    // Get income/expense data
+    const [ieRows] = await pool.query(`
+      SELECT type, amount, category, date
+      FROM income_expenses
+      WHERE date BETWEEN ? AND ?
+    `, [startDate.format('YYYY-MM-DD HH:mm:ss'), endDate.format('YYYY-MM-DD HH:mm:ss')]);
+
+    // Get order data
+    const [orderRows] = await pool.query(`
+      SELECT id, total, status, payment_status, created_at
+      FROM orders
+      WHERE created_at BETWEEN ? AND ?
+    `, [startDate.format('YYYY-MM-DD HH:mm:ss'), endDate.format('YYYY-MM-DD HH:mm:ss')]);
+
+    // Get low stock alerts
+    const [lowStockRows] = await pool.query(`
+      SELECT id, name, category, stock_quantity, min_stock_level
+      FROM products
+      WHERE stock_quantity <= min_stock_level
+      ORDER BY (stock_quantity - min_stock_level) ASC
+      LIMIT 10
+    `);
+
+    // Calculate metrics
+    const totalRevenue = ieRows.filter(ie => ie.type === 'income').reduce((sum, ie) => sum + Number(ie.amount), 0);
+    const totalExpenses = ieRows.filter(ie => ie.type === 'expense').reduce((sum, ie) => sum + Number(ie.amount), 0);
+    const netProfit = totalRevenue - totalExpenses;
+    const orderCount = orderRows.length;
+    const paidOrderCount = orderRows.filter(o => o.payment_status === 'paid').length;
+    const lowStockCount = lowStockRows.length;
+
+    res.json({
+      period,
+      startDate: startDate.format('YYYY-MM-DD'),
+      endDate: endDate.format('YYYY-MM-DD'),
+      totalRevenue,
+      totalExpenses,
+      netProfit,
+      orderCount,
+      paidOrderCount,
+      lowStockCount,
+      lowStockAlerts: lowStockRows,
+      incomeByCategory: ieRows
+        .filter(ie => ie.type === 'income')
+        .reduce((acc, ie) => {
+          const cat = ie.category || 'Uncategorized';
+          acc[cat] = (acc[cat] || 0) + Number(ie.amount);
+          return acc;
+        }, {}),
+      expenseByCategory: ieRows
+        .filter(ie => ie.type === 'expense')
+        .reduce((acc, ie) => {
+          const cat = ie.category || 'Uncategorized';
+          acc[cat] = (acc[cat] || 0) + Number(ie.amount);
+          return acc;
+        }, {})
+    });
+  } catch (error) {
+    res.status(500).json({ message: 'Server error', error: error.message });
+  }
+});
+
+// Bulk delete orders
+app.delete('/api/orders/bulk', authenticateToken, async (req, res) => {
+  const pool = getPool();
+  const conn = await pool.getConnection();
+  try {
+    await conn.beginTransaction();
+    
+    const { ids } = req.body;
+    if (!Array.isArray(ids) || ids.length === 0) {
+      return res.status(400).json({ message: 'Invalid or empty IDs array' });
+    }
+    
+    // Validate that all orders exist
+    const placeholders = ids.map(() => '?').join(',');
+    const [orderRows] = await conn.query(
+      `SELECT id, items, total FROM orders WHERE id IN (${placeholders})`,
+      ids
+    );
+    
+    if (orderRows.length !== ids.length) {
+      await conn.rollback();
+      conn.release();
+      return res.status(400).json({ message: 'Some orders not found' });
+    }
+    
+    // Restore stock for all products in all orders
+    const allProductIds = new Set();
+    const stockRestore = [];
+    
+    for (const order of orderRows) {
+      const items = safeJsonParse(order.items, []);
+      for (const item of items) {
+        if (item.productId) {
+          allProductIds.add(Number(item.productId));
+          stockRestore.push({
+            productId: Number(item.productId),
+            quantity: Number(item.quantity) || 0
+          });
+        }
+      }
+    }
+    
+    // Lock all products at once
+    if (allProductIds.size > 0) {
+      const productPlaceholders = Array.from(allProductIds).map(() => '?').join(',');
+      await conn.query(`SELECT id FROM products WHERE id IN (${productPlaceholders}) AND has_stock = 1 FOR UPDATE`, Array.from(allProductIds));
+    }
+    
+    // Restore stock for each product
+    for (const restore of stockRestore) {
+      await conn.query('UPDATE products SET stock = stock + ? WHERE id = ? AND has_stock = 1', [restore.quantity, restore.productId]);
+    }
+    
+    // Delete matching transactions for all orders
+    for (const order of orderRows) {
+      try {
+        const orderSubtotal = Number(order.total);
+        const [candidateTx] = await conn.query(
+          `SELECT id FROM transactions 
+           WHERE status = 'paid' AND subtotal = ? 
+             AND date >= DATE_SUB(NOW(), INTERVAL 7 DAY)`,
+          [orderSubtotal]
+        );
+        
+        if (Array.isArray(candidateTx) && candidateTx.length > 0) {
+          const items = safeJsonParse(order.items, []);
+          const normalizeItems = (arr) => arr
+            .map((it) => ({
+              productId: it.productId ? Number(it.productId) : null,
+              productName: String(it.productName || ''),
+              quantity: Number(it.quantity || 0),
+              price: Number(it.price || 0),
+            }))
+            .sort((a, b) => {
+              if ((a.productId || 0) !== (b.productId || 0)) return (a.productId || 0) - (b.productId || 0);
+              if (a.productName !== b.productName) return a.productName.localeCompare(b.productName);
+              if (a.price !== b.price) return a.price - b.price;
+              return a.quantity - b.quantity;
+            });
+          const orderSig = normalizeItems(items);
+
+          for (const row of candidateTx) {
+            const txId = row.id;
+            const [txItems] = await conn.query(
+              `SELECT product_id AS productId, product_name AS productName, quantity, price 
+               FROM transaction_items WHERE transaction_id = ?`,
+              [txId]
+            );
+            const txSig = normalizeItems(txItems || []);
+            const sameLength = orderSig.length === txSig.length;
+            let equal = sameLength;
+            if (equal) {
+              for (let i = 0; i < orderSig.length; i++) {
+                const a = orderSig[i];
+                const b = txSig[i];
+                if (
+                  (a.productId || null) !== (b.productId || null) ||
+                  a.productName !== String(b.productName || '') ||
+                  Number(a.quantity) !== Number(b.quantity) ||
+                  Number(a.price) !== Number(b.price)
+                ) { equal = false; break; }
+              }
+            }
+            if (equal) {
+              await conn.query('DELETE FROM transaction_items WHERE transaction_id = ?', [txId]);
+              await conn.query('DELETE FROM transactions WHERE id = ?', [txId]);
+            }
+          }
+        }
+      } catch (e) {
+        // Non-fatal: proceed with order deletion even if transaction matching fails
+      }
+    }
+    
+    // Delete all orders
+    await conn.query(`DELETE FROM orders WHERE id IN (${placeholders})`, ids);
+    
+    // Delete income entries for all orders (try multiple description formats)
+    for (const orderId of ids) {
+      // Delete income entries with different possible description formats
+      await conn.query(
+        `DELETE FROM income_expenses WHERE type = 'income' AND (
+          description = ? OR 
+          description = ? OR 
+          description LIKE ?
+        )`,
+        [
+          `Order #${orderId} Payment`,
+          `Order #${orderId}`,
+          `%Order #${orderId}%`
+        ]
+      );
+    }
+    
+    await conn.commit();
+    res.json({ message: `${ids.length} orders deleted successfully` });
+  } catch (error) {
+    await conn.rollback();
+    res.status(500).json({ message: 'Server error', error: error.message });
+  } finally {
+    conn.release();
   }
 });
 
@@ -1962,12 +2708,100 @@ app.delete('/api/orders/:id', authenticateToken, async (req, res) => {
       return res.status(404).json({ message: 'Order not found' });
     }
     
-    // Note: Transactions are not directly linked to orders in this schema
-    // They are separate entities created during payment processing
-    // So we only delete the order itself
+    // Restore stock for products contained in the order (respect quantities)
+    const items = safeJsonParse(orderRows[0].items, []);
+    const productIds = [];
+    for (const item of items) {
+      if (item.productId) productIds.push(Number(item.productId));
+    }
+    if (productIds.length > 0) {
+      const placeholders = productIds.map(() => '?').join(',');
+      await conn.query(`SELECT id FROM products WHERE id IN (${placeholders}) AND has_stock = 1 FOR UPDATE`, productIds);
+    }
+    for (const item of items) {
+      if (item.productId) {
+        await conn.query('UPDATE products SET stock = stock + ? WHERE id = ? AND has_stock = 1', [Number(item.quantity) || 0, Number(item.productId)]);
+      }
+    }
     
+    // Best-effort: delete matching transaction(s) that were created for this order
+    // We match by: same user, status = 'paid', subtotal equals order.total, and identical item set
+    try {
+      const orderSubtotal = Number(orderRows[0].total);
+        // Fetch candidate transactions by subtotal. Limit to recent 7 days for safety.
+        const [candidateTx] = await conn.query(
+          `SELECT id FROM transactions 
+           WHERE status = 'paid' AND subtotal = ? 
+             AND date >= DATE_SUB(NOW(), INTERVAL 7 DAY)`,
+          [orderSubtotal]
+        );
+      if (Array.isArray(candidateTx) && candidateTx.length > 0) {
+        // Build normalized signature of order items
+        const normalizeItems = (arr) => arr
+          .map((it) => ({
+            productId: it.productId ? Number(it.productId) : null,
+            productName: String(it.productName || ''),
+            quantity: Number(it.quantity || 0),
+            price: Number(it.price || 0),
+          }))
+          .sort((a, b) => {
+            if ((a.productId || 0) !== (b.productId || 0)) return (a.productId || 0) - (b.productId || 0);
+            if (a.productName !== b.productName) return a.productName.localeCompare(b.productName);
+            if (a.price !== b.price) return a.price - b.price;
+            return a.quantity - b.quantity;
+          });
+        const orderSig = normalizeItems(items);
+
+        for (const row of candidateTx) {
+          const txId = row.id;
+          const [txItems] = await conn.query(
+            `SELECT product_id AS productId, product_name AS productName, quantity, price 
+             FROM transaction_items WHERE transaction_id = ?`,
+            [txId]
+          );
+          const txSig = normalizeItems(txItems || []);
+          const sameLength = orderSig.length === txSig.length;
+          let equal = sameLength;
+          if (equal) {
+            for (let i = 0; i < orderSig.length; i++) {
+              const a = orderSig[i];
+              const b = txSig[i];
+              if (
+                (a.productId || null) !== (b.productId || null) ||
+                a.productName !== String(b.productName || '') ||
+                Number(a.quantity) !== Number(b.quantity) ||
+                Number(a.price) !== Number(b.price)
+              ) { equal = false; break; }
+            }
+          }
+          if (equal) {
+            await conn.query('DELETE FROM transaction_items WHERE transaction_id = ?', [txId]);
+            await conn.query('DELETE FROM transactions WHERE id = ?', [txId]);
+          }
+        }
+      }
+    } catch (e) {
+      // Non-fatal: proceed with order deletion even if transaction matching fails
+    }
+
     // Delete the order
     await conn.query('DELETE FROM orders WHERE id = ?', [orderId]);
+
+    // Also delete any income entries that were recorded for this order (if present)
+    await conn.query(
+      `DELETE FROM income_expenses WHERE type = 'income' AND (
+        description = ? OR 
+        description = ? OR 
+        description LIKE ?
+      )`,
+      [
+        `Order #${orderId} Payment`,
+        `Order #${orderId}`,
+        `%Order #${orderId}%`
+      ]
+    );
+
+    // Note: transactions table has no link/description to order; we cannot safely delete here.
     
     await conn.commit();
     res.json({ message: 'Order deleted successfully' });
@@ -1978,6 +2812,8 @@ app.delete('/api/orders/:id', authenticateToken, async (req, res) => {
     conn.release();
   }
 });
+
+
 
 // Check if product is used in orders
 app.get('/api/products/:id/orders', authenticateToken, async (req, res) => {
@@ -2005,6 +2841,96 @@ app.get('/api/products/:id/orders', authenticateToken, async (req, res) => {
     });
   } catch (error) {
     res.status(500).json({ message: 'Server error', error: error.message });
+  }
+});
+
+
+// Bulk delete products
+app.delete('/api/products/bulk', authenticateToken, async (req, res) => {
+  const pool = getPool();
+  const conn = await pool.getConnection();
+  try {
+    await conn.beginTransaction();
+    
+    const { ids, force } = req.body;
+    if (!Array.isArray(ids) || ids.length === 0) {
+      return res.status(400).json({ message: 'Invalid or empty IDs array' });
+    }
+    
+    // Validate that all products exist
+    const placeholders = ids.map(() => '?').join(',');
+    const [productRows] = await conn.query(
+      `SELECT id, name FROM products WHERE id IN (${placeholders})`,
+      ids
+    );
+    
+    if (productRows.length !== ids.length) {
+      await conn.rollback();
+      conn.release();
+      return res.status(400).json({ message: 'Some products not found' });
+    }
+    
+    if (force === true) {
+      // Force delete - remove all related data
+      for (const productId of ids) {
+        // Delete orders that contain this product
+        const [orderRows] = await conn.query(
+          `SELECT id FROM orders 
+           WHERE JSON_CONTAINS(items, JSON_OBJECT('productId', ?))`,
+          [productId]
+        );
+        
+        for (const order of orderRows) {
+          await conn.query('DELETE FROM orders WHERE id = ?', [order.id]);
+        }
+        
+        // Delete transaction items that reference this product
+        await conn.query('DELETE FROM transaction_items WHERE product_id = ?', [productId]);
+        
+        // Delete product option values and groups
+        await conn.query('DELETE pov FROM product_option_values pov JOIN product_option_groups pog ON pov.group_id = pog.id WHERE pog.product_id = ?', [productId]);
+        await conn.query('DELETE FROM product_option_groups WHERE product_id = ?', [productId]);
+      }
+    } else {
+      // Regular delete - check for references first
+      const referencedProducts = [];
+      
+      for (const productId of ids) {
+        // Check if product is referenced in transaction_items
+        const [txItemsRows] = await conn.query('SELECT COUNT(*) as count FROM transaction_items WHERE product_id = ?', [productId]);
+        if (txItemsRows[0].count > 0) {
+          const product = productRows.find(p => p.id == productId);
+          referencedProducts.push(product.name);
+        }
+      }
+      
+      if (referencedProducts.length > 0) {
+        await conn.rollback();
+        conn.release();
+        return res.status(400).json({ 
+          message: `Cannot delete products: ${referencedProducts.join(', ')} are referenced in transaction history. Use force delete to remove all related data.`,
+          hasTransactionItems: true,
+          referencedProducts
+        });
+      }
+      
+      // Delete option groups/values for all products
+      for (const productId of ids) {
+        await conn.query('DELETE pov FROM product_option_values pov JOIN product_option_groups pog ON pov.group_id = pog.id WHERE pog.product_id = ?', [productId]);
+        await conn.query('DELETE FROM product_option_groups WHERE product_id = ?', [productId]);
+      }
+    }
+    
+    // Delete all products
+    await conn.query(`DELETE FROM products WHERE id IN (${placeholders})`, ids);
+    
+    await conn.commit();
+    res.json({ message: `${ids.length} products deleted successfully` });
+  } catch (error) {
+    await conn.rollback();
+    res.status(500).json({ message: 'Server error', error: error.message });
+  } finally {
+    conn.release();
   }
 });
 
@@ -2073,6 +2999,7 @@ app.delete('/api/products/:id', authenticateToken, async (req, res) => {
   }
 });
 
+
 // Update income/expense entry
 app.put('/api/income-expenses/:id', authenticateToken, async (req, res) => {
   try {
@@ -2092,7 +3019,7 @@ app.put('/api/income-expenses/:id', authenticateToken, async (req, res) => {
 });
 
 // Delete income/expense entry
-app.delete('/api/income-expenses/:id', authenticateToken, async (req, res) => {
+app.delete('/api/income-expenses/:id(\\d+)', authenticateToken, async (req, res) => {
   try {
     const pool = getPool();
     const id = req.params.id;
@@ -2129,6 +3056,43 @@ app.delete('/api/income-expenses/bulk', authenticateToken, async (req, res) => {
   }
 });
 
+// Currency Rates Routes
+app.get('/api/currency-rates', authenticateToken, async (req, res) => {
+  try {
+    const pool = getPool();
+    const [rows] = await pool.query(
+      'SELECT from_currency, to_currency, rate, is_active FROM currency_rates WHERE is_active = 1 ORDER BY from_currency, to_currency'
+    );
+    res.json(rows);
+  } catch (error) {
+    res.status(500).json({ message: 'Server error', error: error.message });
+  }
+});
+
+app.put('/api/currency-rates', authenticateToken, async (req, res) => {
+  if (req.user.role !== 'admin') {
+    return res.status(403).json({ message: 'Admin access required' });
+  }
+  try {
+    const { fromCurrency, toCurrency, rate } = req.body;
+    if (!fromCurrency || !toCurrency || !rate) {
+      return res.status(400).json({ message: 'All fields are required' });
+    }
+    
+    const pool = getPool();
+    await pool.query(
+      `INSERT INTO currency_rates (from_currency, to_currency, rate) 
+       VALUES (?, ?, ?) 
+       ON DUPLICATE KEY UPDATE rate = VALUES(rate), updated_at = CURRENT_TIMESTAMP`,
+      [fromCurrency, toCurrency, rate]
+    );
+    
+    res.json({ message: 'Currency rate updated successfully' });
+  } catch (error) {
+    res.status(500).json({ message: 'Server error', error: error.message });
+  }
+});
+
 // Health check
 app.get('/api/health', (req, res) => {
   res.json({ status: 'OK', timestamp: new Date() });
@@ -2140,8 +3104,23 @@ initializeDatabase()
       await ensureUsersTableAndDefaults();
       await ensureTransactionsSchema();
       await ensureOrdersSchema();
+      
+      // Run migrations to remove user_id columns (migration to shared system)
+      console.log('Running migrations to remove user_id columns...');
+      await removeUserIdFromOrders();
+      await removeUserIdFromIncomeExpenses();
+      await removeUserIdFromIncomeCategories();
+      await removeUserIdFromExpenseCategories();
+      await removeUserIdFromTransactions();
+      console.log('Migrations completed successfully');
+      
+      // Run dual currency migrations
+      console.log('Running dual currency migrations...');
+      await addPriceKhrToProducts();
+      await initializeCurrencyRates();
+      console.log('Dual currency migrations completed successfully');
     } catch (e) {
-      console.error('User seeding failed:', e);
+      console.error('Database initialization failed:', e);
     }
     app.listen(PORT, () => {
       console.log(`Server running on port ${PORT}`);
