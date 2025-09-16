@@ -168,6 +168,23 @@ app.delete('/api/media/:s3Key', async (req, res) => {
 
 // All data now stored in MySQL via queries
 
+// Ensure order preview snapshot table
+async function ensureOrderPreviewSchema() {
+  const pool = getPool();
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS order_preview_snapshot (
+      id TINYINT PRIMARY KEY DEFAULT 1,
+      payload JSON NULL,
+      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+  `);
+  // Ensure a single row exists
+  await pool.query(`INSERT IGNORE INTO order_preview_snapshot (id, payload) VALUES (1, JSON_OBJECT())`);
+}
+
+// Simple in-memory list of SSE clients for order preview
+const orderPreviewClients = new Set();
+
 // Ensure users table exists and default users are seeded
 async function ensureUsersTableAndDefaults() {
   const pool = getPool();
@@ -3069,6 +3086,77 @@ app.get('/api/currency-rates', authenticateToken, async (req, res) => {
   }
 });
 
+// Public Order Preview Routes (no auth, device-agnostic)
+app.get('/api/public/order-preview', async (req, res) => {
+  try {
+    const pool = getPool();
+    const [rows] = await pool.query('SELECT payload, updated_at FROM order_preview_snapshot WHERE id = 1');
+    const row = rows && rows[0];
+    const payload = row?.payload || {};
+    res.json({ payload, updatedAt: row?.updated_at });
+  } catch (error) {
+    res.status(500).json({ message: 'Server error', error: error.message });
+  }
+});
+
+app.post('/api/public/order-preview', async (req, res) => {
+  try {
+    const pool = getPool();
+    const payload = req.body?.payload ?? {};
+    // Broadcast first to minimize perceived latency
+    const data = JSON.stringify({ type: 'snapshot', payload });
+    for (const resClient of orderPreviewClients) {
+      try { resClient.write(`data: ${data}\n\n`); } catch {}
+    }
+    // Persist asynchronously (do not block response)
+    (async () => {
+      try {
+        await pool.query('UPDATE order_preview_snapshot SET payload = ? WHERE id = 1', [JSON.stringify(payload)]);
+      } catch (e) {
+        console.warn('Failed to persist order preview snapshot:', e);
+      }
+    })();
+    res.json({ message: 'Saved' });
+  } catch (error) {
+    res.status(500).json({ message: 'Server error', error: error.message });
+  }
+});
+
+// SSE stream for instant order-preview updates
+app.get('/api/public/order-preview/stream', (req, res) => {
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache, no-transform');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('X-Accel-Buffering', 'no');
+  res.flushHeaders && res.flushHeaders();
+  orderPreviewClients.add(res);
+
+  // Send initial snapshot
+  (async () => {
+    try {
+      const pool = getPool();
+      const [rows] = await pool.query('SELECT payload FROM order_preview_snapshot WHERE id = 1');
+      const row = rows && rows[0];
+      const payload = row?.payload || {};
+      const data = JSON.stringify({ type: 'snapshot', payload });
+      // Initial comment to open the stream eagerly in some proxies
+      try { res.write(': connected\n\n'); } catch {}
+      res.write(`data: ${data}\n\n`);
+    } catch {}
+  })();
+
+  // Heartbeat to keep connections alive
+  const heartbeat = setInterval(() => {
+    try { res.write('event: ping\ndata: {}\n\n'); } catch {}
+  }, 15000);
+
+  req.on('close', () => {
+    orderPreviewClients.delete(res);
+    clearInterval(heartbeat);
+    try { res.end(); } catch {}
+  });
+});
+
 app.put('/api/currency-rates', authenticateToken, async (req, res) => {
   if (req.user.role !== 'admin') {
     return res.status(403).json({ message: 'Admin access required' });
@@ -3104,6 +3192,7 @@ initializeDatabase()
       await ensureUsersTableAndDefaults();
       await ensureTransactionsSchema();
       await ensureOrdersSchema();
+      await ensureOrderPreviewSchema();
       
       // Run migrations to remove user_id columns (migration to shared system)
       console.log('Running migrations to remove user_id columns...');
