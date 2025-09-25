@@ -1513,25 +1513,124 @@ app.post('/api/orders', authenticateToken, async (req, res) => {
 
 // Update order (including metadata)
 app.put('/api/orders/:id', authenticateToken, async (req, res) => {
+  const pool = getPool();
+  const conn = await pool.getConnection();
   try {
-    const pool = getPool();
-    const fields = [];
-    const values = [];
-    const mapping = { customerId: 'customer_id', items: 'items', total: 'total', notes: 'notes', metadata: 'metadata' };
-    for (const [key, col] of Object.entries(mapping)) {
-      if (req.body[key] !== undefined) {
-        let v = req.body[key];
-        if (key === 'items' || key === 'metadata') v = JSON.stringify(v);
-        fields.push(`${col} = ?`);
-        values.push(v);
+    await conn.beginTransaction();
+
+    const [orderRows] = await conn.query('SELECT * FROM orders WHERE id = ?', [req.params.id]);
+    const existingOrder = orderRows[0];
+    if (!existingOrder) {
+      await conn.rollback();
+      return res.status(404).json({ message: 'Order not found' });
+    }
+
+    const previousItems = safeJsonParse(existingOrder.items, []);
+    const incomingItems = req.body.items !== undefined ? safeJsonParse(req.body.items, previousItems) : previousItems;
+
+    if (req.body.items !== undefined) {
+      const quantityDiff = new Map();
+      const accumulate = (items, direction) => {
+        (items || []).forEach((item) => {
+          const rawId = item?.productId ?? item?.product_id;
+          const productId = Number(rawId);
+          if (!rawId || Number.isNaN(productId)) return;
+          const qty = Number(item.quantity) || 0;
+          if (!qty) return;
+          quantityDiff.set(productId, (quantityDiff.get(productId) || 0) + direction * qty);
+        });
+      };
+
+      accumulate(previousItems, -1);
+      accumulate(incomingItems, 1);
+
+      const productIds = Array.from(quantityDiff.keys());
+      if (productIds.length > 0) {
+        const placeholders = productIds.map(() => '?').join(',');
+        const [productRows] = await conn.query(
+          `SELECT id, name, has_stock, stock FROM products WHERE id IN (${placeholders}) FOR UPDATE`,
+          productIds
+        );
+        const productMap = new Map(productRows.map((row) => [Number(row.id), row]));
+
+        let stockFailure = null;
+        for (const [productId, diff] of quantityDiff.entries()) {
+          if (!diff) continue;
+          const product = productMap.get(productId);
+          if (!product || !product.has_stock) continue;
+          if (diff > 0 && Number(product.stock) < diff) {
+            stockFailure = { id: productId, name: product.name };
+            break;
+          }
+        }
+
+        if (stockFailure) {
+          await conn.rollback();
+          return res.status(400).json({
+            message: `Insufficient stock for product ${stockFailure.name || stockFailure.id}`,
+          });
+        }
+
+        for (const [productId, diff] of quantityDiff.entries()) {
+          if (!diff) continue;
+          const product = productMap.get(productId);
+          if (!product || !product.has_stock) continue;
+          if (diff > 0) {
+            await conn.query('UPDATE products SET stock = stock - ? WHERE id = ?', [diff, productId]);
+          } else {
+            await conn.query('UPDATE products SET stock = stock + ? WHERE id = ?', [-diff, productId]);
+          }
+        }
       }
     }
-    if (!fields.length) return res.json({ id: req.params.id });
-    values.push(req.params.id);
-    await pool.query(`UPDATE orders SET ${fields.join(', ')} WHERE id = ?`, values);
-    res.json({ id: req.params.id, ...req.body });
+
+    const fields = [];
+    const values = [];
+    const columnMapping = [
+      ['customerId', 'customer_id', (v) => (v === null || v === undefined || v === '' ? null : Number(v))],
+      ['items', 'items', (v) => JSON.stringify(v)],
+      ['total', 'total'],
+      ['notes', 'notes'],
+      ['metadata', 'metadata', (v) => JSON.stringify(v)],
+      ['paymentStatus', 'payment_status'],
+      ['paymentMethod', 'payment_method'],
+      ['tableNumber', 'table_number'],
+    ];
+
+    for (const [key, column, transform] of columnMapping) {
+      if (req.body[key] !== undefined) {
+        let value = req.body[key];
+        if (transform) {
+          value = transform(value);
+        }
+        fields.push(`${column} = ?`);
+        values.push(value);
+      }
+    }
+
+    if (fields.length > 0) {
+      values.push(req.params.id);
+      await conn.query(`UPDATE orders SET ${fields.join(', ')} WHERE id = ?`, values);
+    }
+
+    await conn.commit();
+
+    const responsePayload = { id: req.params.id };
+    for (const key of ['customerId', 'total', 'notes', 'metadata', 'paymentStatus', 'paymentMethod', 'tableNumber']) {
+      if (req.body[key] !== undefined) {
+        responsePayload[key] = req.body[key];
+      }
+    }
+    if (req.body.items !== undefined) {
+      responsePayload.items = incomingItems;
+    }
+
+    res.json(responsePayload);
   } catch (error) {
+    await conn.rollback();
     res.status(500).json({ message: 'Server error', error: error.message });
+  } finally {
+    conn.release();
   }
 });
 
