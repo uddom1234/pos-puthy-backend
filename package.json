@@ -5,7 +5,9 @@
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
-    "dev": "nodemon index.js"
+    "dev": "nodemon index.js",
+    "db-check": "node check-db-structure.js",
+    "db-quick": "node quick-db-check.js"
   },
   "dependencies": {
     "aws-sdk": "^2.1692.0",

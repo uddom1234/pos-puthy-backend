@@ -21,9 +21,19 @@ function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
+function toISOStringPreservingLocal(date) {
+  if (!date) return null;
+  const dateObj = date instanceof Date ? date : new Date(date);
+  if (isNaN(dateObj.getTime())) {
+    return null;
+  }
+  const adjusted = dateObj.getTime() - (dateObj.getTimezoneOffset() * 60000);
+  return new Date(adjusted).toISOString();
+}
+
 const { initializeDatabase, getPool } = require('./db');
 const app = express();
-const PORT = process.env.PORT || 5000;
+const PORT = process.env.PORT || 4000;
 const JWT_SECRET = process.env.JWT_SECRET || 'your-super-secret-jwt-key-change-in-production';
 
 // Middleware 
@@ -1396,7 +1406,10 @@ app.get('/api/income-expenses', authenticateToken, async (req, res) => {
     if (category) { sql += ' AND category = ?'; params.push(category); }
     sql += ' ORDER BY date DESC';
     const [rows] = await pool.query(sql, params);
-    rows.forEach(r => { r.id = String(r.id); r.date = new Date(r.date).toISOString(); });
+    rows.forEach(r => {
+      r.id = String(r.id);
+      r.date = toISOStringPreservingLocal(r.date);
+    });
     res.json(rows);
   } catch (error) {
     res.status(500).json({ message: 'Server error', error: error.message });
@@ -1440,7 +1453,7 @@ app.get('/api/orders', authenticateToken, async (req, res) => {
     const normalized = rows.map(r => ({
       ...r,
       id: String(r.id),
-      createdAt: r.createdAt ? new Date(r.createdAt).toISOString() : null,
+      createdAt: toISOStringPreservingLocal(r.createdAt),
       items: safeJsonParse(r.items, []),
       metadata: safeJsonParse(r.metadata, {}),
     }));
@@ -2181,6 +2194,54 @@ app.get('/api/reports/sales-summary', authenticateToken, async (req, res) => {
       `SELECT total, created_at AS createdAt FROM orders ${orderWhere}`,
       orderParams
     );
+
+    // Fetch items sold data from orders JSON items field
+    const [orderItemsData] = await pool.query(`
+      SELECT id, items, payment_status, created_at
+      FROM orders
+      ${orderWhere}
+        ${orderWhere ? 'AND' : 'WHERE'} payment_status = 'paid'
+    `, orderParams);
+
+    // Process JSON items data to get aggregated items sold
+    const itemsMap = new Map();
+
+    orderItemsData.forEach(order => {
+      try {
+        const items = typeof order.items === 'string' ? JSON.parse(order.items) : order.items;
+        if (Array.isArray(items)) {
+          items.forEach(item => {
+            const key = `${item.productId}_${item.productName}`;
+            if (itemsMap.has(key)) {
+              const existing = itemsMap.get(key);
+              existing.quantity += parseInt(item.quantity) || 0;
+              existing.revenue += (parseFloat(item.price) || 0) * (parseInt(item.quantity) || 0);
+              existing.orderCount += 1;
+            } else {
+              itemsMap.set(key, {
+                productName: item.productName,
+                productId: item.productId,
+                category: item.category || 'Uncategorized',
+                quantity: parseInt(item.quantity) || 0,
+                revenue: (parseFloat(item.price) || 0) * (parseInt(item.quantity) || 0),
+                avgPrice: parseFloat(item.price) || 0,
+                orderCount: 1
+              });
+            }
+          });
+        }
+      } catch (error) {
+        console.error('Error parsing order items:', error);
+      }
+    });
+
+    // Convert map to array and sort by quantity
+    const itemsSoldRows = Array.from(itemsMap.values())
+      .map(item => ({
+        ...item,
+        avgPrice: item.quantity > 0 ? item.revenue / item.quantity : 0
+      }))
+      .sort((a, b) => b.quantity - a.quantity);
     // Compute dashboard metrics solely from income_expenses
     const incomeSum = ieRows.filter(ie => ie.type === 'income').reduce((sum, ie) => sum + Number(ie.amount), 0);
     const additionalIncome = incomeSum;
@@ -2232,7 +2293,7 @@ app.get('/api/reports/sales-summary', authenticateToken, async (req, res) => {
       averageOrderValue,
       incomeByCategory,
       expenseByCategory,
-      itemsSold: [],
+      itemsSold: itemsSoldRows,
       categoryBreakdown: [],
       hourlyData: []
     });
@@ -2263,23 +2324,54 @@ app.get('/api/reports/top-selling-items', authenticateToken, async (req, res) =>
     }
 
     const pool = getPool();
-    const [rows] = await pool.query(`
-      SELECT 
-        oi.product_name as productName,
-        oi.product_id as productId,
-        oi.category,
-        SUM(oi.quantity) as totalQuantity,
-        SUM(oi.quantity * oi.price) as totalRevenue,
-        AVG(oi.price) as avgPrice,
-        COUNT(DISTINCT o.id) as orderCount
-      FROM order_items oi
-      JOIN orders o ON oi.order_id = o.id
-      WHERE o.created_at BETWEEN ? AND ?
-        AND o.payment_status = 'paid'
-      GROUP BY oi.product_id, oi.product_name, oi.category
-      ORDER BY totalQuantity DESC
-      LIMIT ?
-    `, [startDate.format('YYYY-MM-DD HH:mm:ss'), endDate.format('YYYY-MM-DD HH:mm:ss'), parseInt(limit)]);
+    // Fetch data from orders JSON items field
+    const [orderItemsData] = await pool.query(`
+      SELECT id, items, payment_status, created_at
+      FROM orders
+      WHERE created_at BETWEEN ? AND ?
+        AND payment_status = 'paid'
+    `, [startDate.format('YYYY-MM-DD HH:mm:ss'), endDate.format('YYYY-MM-DD HH:mm:ss')]);
+
+    // Process JSON items data to get aggregated items sold
+    const itemsMap = new Map();
+
+    orderItemsData.forEach(order => {
+      try {
+        const items = typeof order.items === 'string' ? JSON.parse(order.items) : order.items;
+        if (Array.isArray(items)) {
+          items.forEach(item => {
+            const key = `${item.productId}_${item.productName}`;
+            if (itemsMap.has(key)) {
+              const existing = itemsMap.get(key);
+              existing.totalQuantity += parseInt(item.quantity) || 0;
+              existing.totalRevenue += (parseFloat(item.price) || 0) * (parseInt(item.quantity) || 0);
+              existing.orderCount += 1;
+            } else {
+              itemsMap.set(key, {
+                productName: item.productName,
+                productId: item.productId,
+                category: item.category || 'Uncategorized',
+                totalQuantity: parseInt(item.quantity) || 0,
+                totalRevenue: (parseFloat(item.price) || 0) * (parseInt(item.quantity) || 0),
+                avgPrice: parseFloat(item.price) || 0,
+                orderCount: 1
+              });
+            }
+          });
+        }
+      } catch (error) {
+        console.error('Error parsing order items:', error);
+      }
+    });
+
+    // Convert map to array, calculate avgPrice, and sort by totalQuantity
+    const rows = Array.from(itemsMap.values())
+      .map(item => ({
+        ...item,
+        avgPrice: item.totalQuantity > 0 ? item.totalRevenue / item.totalQuantity : 0
+      }))
+      .sort((a, b) => b.totalQuantity - a.totalQuantity)
+      .slice(0, parseInt(limit));
 
     res.json({
       period: period || 'custom',
