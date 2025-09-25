@@ -1613,6 +1613,115 @@ app.put('/api/orders/:id', authenticateToken, async (req, res) => {
       await conn.query(`UPDATE orders SET ${fields.join(', ')} WHERE id = ?`, values);
     }
 
+    const newItemsArray = Array.isArray(incomingItems) ? incomingItems : [];
+    const normalizeItems = (arr) => (Array.isArray(arr) ? arr : [])
+      .map((it) => ({
+        productId: it?.productId != null ? Number(it.productId) : null,
+        productName: String(it?.productName || ''),
+        quantity: Number(it?.quantity || 0),
+        price: Number(it?.price || 0),
+      }))
+      .sort((a, b) => {
+        if ((a.productId || 0) !== (b.productId || 0)) return (a.productId || 0) - (b.productId || 0);
+        if (a.productName !== b.productName) return a.productName.localeCompare(b.productName);
+        if (a.price !== b.price) return a.price - b.price;
+        return a.quantity - b.quantity;
+      });
+
+    const newSubtotal = newItemsArray.reduce((sum, it) => sum + Number(it.price || 0) * Number(it.quantity || 0), 0);
+    const providedTotal = req.body.total !== undefined ? Number(req.body.total) : undefined;
+    const newTotal = providedTotal !== undefined ? providedTotal : Number(existingOrder.total || 0);
+    const newDiscount = Number((Number(newSubtotal) - Number(newTotal)).toFixed(2));
+
+    if (existingOrder.payment_status === 'paid') {
+      try {
+        const previousSignature = normalizeItems(previousItems);
+        let matchedTransactionId = null;
+
+        if (previousSignature.length > 0) {
+          const previousTotal = Number(existingOrder.total || 0);
+          const [candidateTx] = await conn.query(
+            `SELECT id FROM transactions 
+             WHERE status = 'paid' AND ABS(total - ?) < 0.01 
+             AND date >= DATE_SUB(NOW(), INTERVAL 30 DAY)
+             ORDER BY date DESC LIMIT 25`,
+            [previousTotal]
+          );
+
+          for (const row of candidateTx || []) {
+            const [txItems] = await conn.query(
+              `SELECT product_id AS productId, product_name AS productName, quantity, price
+               FROM transaction_items WHERE transaction_id = ?`,
+              [row.id]
+            );
+            const txSignature = normalizeItems(txItems);
+            if (txSignature.length !== previousSignature.length) continue;
+            let same = true;
+            for (let i = 0; i < previousSignature.length; i++) {
+              const a = previousSignature[i];
+              const b = txSignature[i];
+              if (
+                (a.productId || null) !== (b.productId || null) ||
+                a.productName !== b.productName ||
+                Number(a.quantity) !== Number(b.quantity) ||
+                Number(a.price) !== Number(b.price)
+              ) {
+                same = false;
+                break;
+              }
+            }
+            if (same) {
+              matchedTransactionId = row.id;
+              break;
+            }
+          }
+        }
+
+        if (matchedTransactionId) {
+          await conn.query(
+            `UPDATE transactions 
+             SET subtotal = ?, total = ?, discount = ?, date = date 
+             WHERE id = ?`,
+            [Number(newSubtotal.toFixed(2)), Number(newTotal.toFixed(2)), Number(newDiscount.toFixed(2)), matchedTransactionId]
+          );
+          await conn.query('DELETE FROM transaction_items WHERE transaction_id = ?', [matchedTransactionId]);
+          for (const item of newItemsArray) {
+            await conn.query(
+              `INSERT INTO transaction_items (transaction_id, product_id, product_name, quantity, price, customizations)
+               VALUES (?,?,?,?,?,?)`,
+              [
+                matchedTransactionId,
+                item.productId ? Number(item.productId) : null,
+                item.productName,
+                Number(item.quantity) || 0,
+                Number(item.price) || 0,
+                item.customizations ? JSON.stringify(item.customizations) : null,
+              ]
+            );
+          }
+        }
+
+        const incomeDescriptionPrimary = `Order #${req.params.id} Payment`;
+        await conn.query(
+          `UPDATE income_expenses 
+           SET amount = ?
+           WHERE type = 'income' AND (
+             description = ? OR
+             description = ? OR
+             description LIKE ?
+           )`,
+          [
+            Number(newTotal.toFixed(2)),
+            incomeDescriptionPrimary,
+            `Order #${req.params.id}`,
+            `%Order #${req.params.id}%`,
+          ]
+        );
+      } catch (e) {
+        console.error('Failed to sync transaction/income for updated order', req.params.id, e);
+      }
+    }
+
     await conn.commit();
 
     const responsePayload = { id: req.params.id };
