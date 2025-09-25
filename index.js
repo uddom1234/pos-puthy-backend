@@ -33,7 +33,7 @@ function toISOStringPreservingLocal(date) {
 
 const { initializeDatabase, getPool } = require('./db');
 const app = express();
-const PORT = process.env.PORT || 4000;
+const PORT = process.env.PORT || 5000;
 const JWT_SECRET = process.env.JWT_SECRET || 'your-super-secret-jwt-key-change-in-production';
 
 // Middleware 
