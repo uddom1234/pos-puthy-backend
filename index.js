@@ -1447,14 +1447,41 @@ app.get('/api/orders', authenticateToken, async (req, res) => {
   try {
     const pool = getPool();
     const [rows] = await pool.query(
-      `SELECT id, customer_id AS customerId, items, total, created_at AS createdAt, table_number AS tableNumber, notes, metadata, payment_status AS paymentStatus, payment_method AS paymentMethod
+      `SELECT id, customer_id AS customerId, total, created_at AS createdAt, table_number AS tableNumber, notes, metadata, payment_status AS paymentStatus, payment_method AS paymentMethod
        FROM orders ORDER BY created_at DESC`
     );
+
+    // Get order items for each order
+    const orderIds = rows.map(o => o.id);
+    let orderItems = [];
+    if (orderIds.length > 0) {
+      const [itemRows] = await pool.query(`
+        SELECT 
+          order_id as orderId,
+          product_id as productId,
+          product_name as productName,
+          quantity,
+          price,
+          customizations
+        FROM order_items
+        WHERE order_id IN (${orderIds.map(() => '?').join(',')})
+        ORDER BY order_id, id
+      `, orderIds);
+      orderItems = itemRows;
+    }
+
+    // Group items by order
+    const itemsByOrder = orderItems.reduce((acc, item) => {
+      if (!acc[item.orderId]) acc[item.orderId] = [];
+      acc[item.orderId].push(item);
+      return acc;
+    }, {});
+
     const normalized = rows.map(r => ({
       ...r,
       id: String(r.id),
       createdAt: toISOStringPreservingLocal(r.createdAt),
-      items: safeJsonParse(r.items, []),
+      items: itemsByOrder[r.id] || [],
       metadata: safeJsonParse(r.metadata, {}),
     }));
     res.json(normalized);
@@ -1496,10 +1523,20 @@ app.post('/api/orders', authenticateToken, async (req, res) => {
     
     // Create the order
     const [result] = await conn.query(
-      `INSERT INTO orders (customer_id, items, total, created_at, table_number, notes, metadata)
-       VALUES (?,?,?,?,?,?,?)`,
-      [req.body.customerId ? Number(req.body.customerId) : null, JSON.stringify(items), req.body.total, createdAt, req.body.tableNumber || null, req.body.notes || null, req.body.metadata ? JSON.stringify(req.body.metadata) : null]
+      `INSERT INTO orders (customer_id, total, created_at, table_number, notes, metadata)
+       VALUES (?,?,?,?,?,?)`,
+      [req.body.customerId ? Number(req.body.customerId) : null, req.body.total, createdAt, req.body.tableNumber || null, req.body.notes || null, req.body.metadata ? JSON.stringify(req.body.metadata) : null]
     );
+    const orderId = result.insertId;
+
+    // Insert order items
+    for (const item of items) {
+      await conn.query(
+        `INSERT INTO order_items (order_id, product_id, product_name, quantity, price, customizations)
+         VALUES (?,?,?,?,?,?)`,
+        [orderId, item.productId ? Number(item.productId) : null, item.productName, item.quantity, item.price, item.customizations ? JSON.stringify(item.customizations) : null]
+      );
+    }
     
     await conn.commit();
     res.status(201).json({ id: String(result.insertId), ...req.body, createdAt });
@@ -1525,8 +1562,8 @@ app.put('/api/orders/:id', authenticateToken, async (req, res) => {
       return res.status(404).json({ message: 'Order not found' });
     }
 
-    const previousItems = safeJsonParse(existingOrder.items, []);
-    const incomingItems = req.body.items !== undefined ? safeJsonParse(req.body.items, previousItems) : previousItems;
+    const [existingItems] = await conn.query('SELECT * FROM order_items WHERE order_id = ?', [req.params.id]);
+    const incomingItems = req.body.items !== undefined ? req.body.items : existingItems;
 
     if (req.body.items !== undefined) {
       const quantityDiff = new Map();
@@ -1541,7 +1578,7 @@ app.put('/api/orders/:id', authenticateToken, async (req, res) => {
         });
       };
 
-      accumulate(previousItems, -1);
+      accumulate(existingItems, -1);
       accumulate(incomingItems, 1);
 
       const productIds = Array.from(quantityDiff.keys());
@@ -1584,11 +1621,21 @@ app.put('/api/orders/:id', authenticateToken, async (req, res) => {
       }
     }
 
+    if (req.body.items !== undefined) {
+      await conn.query('DELETE FROM order_items WHERE order_id = ?', [req.params.id]);
+      for (const item of incomingItems) {
+        await conn.query(
+          `INSERT INTO order_items (order_id, product_id, product_name, quantity, price, customizations)
+           VALUES (?,?,?,?,?,?)`,
+          [req.params.id, item.productId ? Number(item.productId) : null, item.productName, item.quantity, item.price, item.customizations ? JSON.stringify(item.customizations) : null]
+        );
+      }
+    }
+
     const fields = [];
     const values = [];
     const columnMapping = [
       ['customerId', 'customer_id', (v) => (v === null || v === undefined || v === '' ? null : Number(v))],
-      ['items', 'items', (v) => JSON.stringify(v)],
       ['total', 'total'],
       ['notes', 'notes'],
       ['metadata', 'metadata', (v) => JSON.stringify(v)],
@@ -1817,13 +1864,12 @@ app.put('/api/orders/:id/payment', authenticateToken, async (req, res) => {
       const txId = txResult.insertId;
       console.log('Transaction created with ID:', txId);
       
-      // Parse order items and create transaction items
-      const items = safeJsonParse(order.items, []);
+      const [items] = await conn.query('SELECT * FROM order_items WHERE order_id = ?', [orderId]);
       for (const item of items) {
         await conn.query(
           `INSERT INTO transaction_items (transaction_id, product_id, product_name, quantity, price, customizations)
            VALUES (?,?,?,?,?,?)`,
-          [txId, item.productId ? Number(item.productId) : null, item.productName, item.quantity, item.price, item.customizations ? JSON.stringify(item.customizations) : null]
+          [txId, item.product_id ? Number(item.product_id) : null, item.product_name, item.quantity, item.price, item.customizations ? JSON.stringify(item.customizations) : null]
         );
       }
       
@@ -2403,43 +2449,45 @@ app.get('/api/reports/sales-summary', authenticateToken, async (req, res) => {
       orderParams
     );
 
-    // Fetch items sold data from orders JSON items field
+    // Fetch items sold data from order_items table
     const [orderItemsData] = await pool.query(`
-      SELECT id, items, payment_status, created_at
-      FROM orders
-      ${orderWhere}
-        ${orderWhere ? 'AND' : 'WHERE'} payment_status = 'paid'
+      SELECT
+        oi.product_name as productName,
+        oi.product_id as productId,
+        p.category,
+        oi.quantity,
+        oi.price
+      FROM order_items oi
+      JOIN orders o ON oi.order_id = o.id
+      LEFT JOIN products p ON oi.product_id = p.id
+      ${orderWhere.replace(/created_at/g, 'o.created_at')}
+        ${orderWhere ? 'AND' : 'WHERE'} o.payment_status = 'paid'
     `, orderParams);
 
-    // Process JSON items data to get aggregated items sold
+    // Process items data to get aggregated items sold
     const itemsMap = new Map();
 
-    orderItemsData.forEach(order => {
+    orderItemsData.forEach(item => {
       try {
-        const items = typeof order.items === 'string' ? JSON.parse(order.items) : order.items;
-        if (Array.isArray(items)) {
-          items.forEach(item => {
-            const key = `${item.productId}_${item.productName}`;
-            if (itemsMap.has(key)) {
-              const existing = itemsMap.get(key);
-              existing.quantity += parseInt(item.quantity) || 0;
-              existing.revenue += (parseFloat(item.price) || 0) * (parseInt(item.quantity) || 0);
-              existing.orderCount += 1;
-            } else {
-              itemsMap.set(key, {
-                productName: item.productName,
-                productId: item.productId,
-                category: item.category || 'Uncategorized',
-                quantity: parseInt(item.quantity) || 0,
-                revenue: (parseFloat(item.price) || 0) * (parseInt(item.quantity) || 0),
-                avgPrice: parseFloat(item.price) || 0,
-                orderCount: 1
-              });
-            }
+        const key = `${item.productId}_${item.productName}`;
+        if (itemsMap.has(key)) {
+          const existing = itemsMap.get(key);
+          existing.quantity += parseInt(item.quantity) || 0;
+          existing.revenue += (parseFloat(item.price) || 0) * (parseInt(item.quantity) || 0);
+          existing.orderCount += 1;
+        } else {
+          itemsMap.set(key, {
+            productName: item.productName,
+            productId: item.productId,
+            category: item.category || 'Uncategorized',
+            quantity: parseInt(item.quantity) || 0,
+            revenue: (parseFloat(item.price) || 0) * (parseInt(item.quantity) || 0),
+            avgPrice: parseFloat(item.price) || 0,
+            orderCount: 1
           });
         }
       } catch (error) {
-        console.error('Error parsing order items:', error);
+        console.error('Error processing order item:', error);
       }
     });
 
@@ -2532,43 +2580,45 @@ app.get('/api/reports/top-selling-items', authenticateToken, async (req, res) =>
     }
 
     const pool = getPool();
-    // Fetch data from orders JSON items field
+    // Fetch data from order_items table
     const [orderItemsData] = await pool.query(`
-      SELECT id, items, payment_status, created_at
-      FROM orders
-      WHERE created_at BETWEEN ? AND ?
-        AND payment_status = 'paid'
+      SELECT
+        oi.product_name as productName,
+        oi.product_id as productId,
+        p.category,
+        oi.quantity,
+        oi.price
+      FROM order_items oi
+      JOIN orders o ON oi.order_id = o.id
+      LEFT JOIN products p ON oi.product_id = p.id
+      WHERE o.created_at BETWEEN ? AND ?
+        AND o.payment_status = 'paid'
     `, [startDate.format('YYYY-MM-DD HH:mm:ss'), endDate.format('YYYY-MM-DD HH:mm:ss')]);
 
-    // Process JSON items data to get aggregated items sold
+    // Process items data to get aggregated items sold
     const itemsMap = new Map();
 
-    orderItemsData.forEach(order => {
+    orderItemsData.forEach(item => {
       try {
-        const items = typeof order.items === 'string' ? JSON.parse(order.items) : order.items;
-        if (Array.isArray(items)) {
-          items.forEach(item => {
-            const key = `${item.productId}_${item.productName}`;
-            if (itemsMap.has(key)) {
-              const existing = itemsMap.get(key);
-              existing.totalQuantity += parseInt(item.quantity) || 0;
-              existing.totalRevenue += (parseFloat(item.price) || 0) * (parseInt(item.quantity) || 0);
-              existing.orderCount += 1;
-            } else {
-              itemsMap.set(key, {
-                productName: item.productName,
-                productId: item.productId,
-                category: item.category || 'Uncategorized',
-                totalQuantity: parseInt(item.quantity) || 0,
-                totalRevenue: (parseFloat(item.price) || 0) * (parseInt(item.quantity) || 0),
-                avgPrice: parseFloat(item.price) || 0,
-                orderCount: 1
-              });
-            }
+        const key = `${item.productId}_${item.productName}`;
+        if (itemsMap.has(key)) {
+          const existing = itemsMap.get(key);
+          existing.totalQuantity += parseInt(item.quantity) || 0;
+          existing.totalRevenue += (parseFloat(item.price) || 0) * (parseInt(item.quantity) || 0);
+          existing.orderCount += 1;
+        } else {
+          itemsMap.set(key, {
+            productName: item.productName,
+            productId: item.productId,
+            category: item.category || 'Uncategorized',
+            totalQuantity: parseInt(item.quantity) || 0,
+            totalRevenue: (parseFloat(item.price) || 0) * (parseInt(item.quantity) || 0),
+            avgPrice: parseFloat(item.price) || 0,
+            orderCount: 1
           });
         }
       } catch (error) {
-        console.error('Error parsing order items:', error);
+        console.error('Error processing order item:', error);
       }
     });
 
@@ -2690,7 +2740,7 @@ app.get('/api/reports/orders', authenticateToken, async (req, res) => {
     let params = [startDate.format('YYYY-MM-DD HH:mm:ss'), endDate.format('YYYY-MM-DD HH:mm:ss')];
 
     if (status) {
-      whereClause += ' AND o.status = ?';
+      whereClause += ' AND o.payment_status = ?';
       params.push(status);
     }
 
@@ -2701,7 +2751,28 @@ app.get('/api/reports/orders', authenticateToken, async (req, res) => {
 
     const offset = (parseInt(page) - 1) * parseInt(limit);
     const validSortColumns = ['created_at', 'total', 'status', 'payment_status', 'customer_name'];
-    const sortColumn = validSortColumns.includes(sortBy) ? sortBy : 'created_at';
+    let sortColumn;
+    const sortByValue = validSortColumns.includes(sortBy) ? sortBy : 'created_at';
+    switch (sortByValue) {
+      case 'status':
+        sortColumn = 'o.payment_status';
+        break;
+      case 'payment_status':
+        sortColumn = 'o.payment_status';
+        break;
+      case 'customer_name':
+        sortColumn = 'c.name';
+        break;
+      case 'total':
+        sortColumn = 'o.total';
+        break;
+      case 'created_at':
+        sortColumn = 'o.created_at';
+        break;
+      default:
+        sortColumn = 'o.created_at';
+    }
+
     const sortDirection = sortOrder.toLowerCase() === 'asc' ? 'ASC' : 'DESC';
 
     const pool = getPool();
@@ -2709,6 +2780,7 @@ app.get('/api/reports/orders', authenticateToken, async (req, res) => {
     const [countRows] = await pool.query(`
       SELECT COUNT(*) as total
       FROM orders o
+      LEFT JOIN customers c ON o.customer_id = c.id
       ${whereClause}
     `, params);
 
@@ -2716,22 +2788,18 @@ app.get('/api/reports/orders', authenticateToken, async (req, res) => {
     const [orderRows] = await pool.query(`
       SELECT 
         o.id,
-        o.customer_name as customerName,
-        o.customer_phone as customerPhone,
-        o.items,
-        o.subtotal,
-        o.discount,
+        c.name as customerName,
+        c.phone as customerPhone,
         o.total,
-        o.status,
         o.payment_status as paymentStatus,
         o.payment_method as paymentMethod,
-        o.cash_received as cashReceived,
-        o.change_amount as changeAmount,
         o.created_at as createdAt,
-        o.updated_at as updatedAt
+        o.table_number as tableNumber,
+        o.notes
       FROM orders o
+      LEFT JOIN customers c ON o.customer_id = c.id
       ${whereClause}
-      ORDER BY o.${sortColumn} ${sortDirection}
+      ORDER BY ${sortColumn} ${sortDirection}
       LIMIT ? OFFSET ?
     `, [...params, parseInt(limit), offset]);
 
@@ -2744,10 +2812,9 @@ app.get('/api/reports/orders', authenticateToken, async (req, res) => {
           order_id as orderId,
           product_name as productName,
           product_id as productId,
-          category,
           quantity,
           price,
-          total
+          customizations
         FROM order_items
         WHERE order_id IN (${orderIds.map(() => '?').join(',')})
         ORDER BY order_id, id
@@ -2813,17 +2880,17 @@ app.get('/api/reports/dashboard', authenticateToken, async (req, res) => {
 
     // Get order data
     const [orderRows] = await pool.query(`
-      SELECT id, total, status, payment_status, created_at
+      SELECT id, total, payment_status, created_at
       FROM orders
       WHERE created_at BETWEEN ? AND ?
     `, [startDate.format('YYYY-MM-DD HH:mm:ss'), endDate.format('YYYY-MM-DD HH:mm:ss')]);
 
     // Get low stock alerts
     const [lowStockRows] = await pool.query(`
-      SELECT id, name, category, stock_quantity, min_stock_level
+      SELECT id, name, category, stock, low_stock_threshold
       FROM products
-      WHERE stock_quantity <= min_stock_level
-      ORDER BY (stock_quantity - min_stock_level) ASC
+      WHERE has_stock = 1 AND stock <= low_stock_threshold
+      ORDER BY (stock - low_stock_threshold) ASC
       LIMIT 10
     `);
 
@@ -2881,7 +2948,7 @@ app.delete('/api/orders/bulk', authenticateToken, async (req, res) => {
     // Validate that all orders exist
     const placeholders = ids.map(() => '?').join(',');
     const [orderRows] = await conn.query(
-      `SELECT id, items, total FROM orders WHERE id IN (${placeholders})`,
+      `SELECT id, total FROM orders WHERE id IN (${placeholders})`,
       ids
     );
     
@@ -2894,17 +2961,16 @@ app.delete('/api/orders/bulk', authenticateToken, async (req, res) => {
     // Restore stock for all products in all orders
     const allProductIds = new Set();
     const stockRestore = [];
+
+    const [orderItems] = await conn.query(`SELECT * FROM order_items WHERE order_id IN (${placeholders})`, ids);
     
-    for (const order of orderRows) {
-      const items = safeJsonParse(order.items, []);
-      for (const item of items) {
-        if (item.productId) {
-          allProductIds.add(Number(item.productId));
-          stockRestore.push({
-            productId: Number(item.productId),
-            quantity: Number(item.quantity) || 0
-          });
-        }
+    for (const item of orderItems) {
+      if (item.product_id) {
+        allProductIds.add(Number(item.product_id));
+        stockRestore.push({
+          productId: Number(item.product_id),
+          quantity: Number(item.quantity) || 0
+        });
       }
     }
     
@@ -2931,14 +2997,14 @@ app.delete('/api/orders/bulk', authenticateToken, async (req, res) => {
         );
         
         if (Array.isArray(candidateTx) && candidateTx.length > 0) {
-          const items = safeJsonParse(order.items, []);
-          const normalizeItems = (arr) => arr
-            .map((it) => ({
-              productId: it.productId ? Number(it.productId) : null,
-              productName: String(it.productName || ''),
-              quantity: Number(it.quantity || 0),
-              price: Number(it.price || 0),
-            }))
+        const [items] = await conn.query('SELECT * FROM order_items WHERE order_id = ?', [order.id]);
+        const normalizeItems = (arr) => arr
+          .map((it) => ({
+            productId: it.product_id ? Number(it.product_id) : null,
+            productName: String(it.product_name || ''),
+            quantity: Number(it.quantity || 0),
+            price: Number(it.price || 0),
+          }))
             .sort((a, b) => {
               if ((a.productId || 0) !== (b.productId || 0)) return (a.productId || 0) - (b.productId || 0);
               if (a.productName !== b.productName) return a.productName.localeCompare(b.productName);
@@ -3026,18 +3092,18 @@ app.delete('/api/orders/:id', authenticateToken, async (req, res) => {
     }
     
     // Restore stock for products contained in the order (respect quantities)
-    const items = safeJsonParse(orderRows[0].items, []);
+    const [items] = await conn.query('SELECT * FROM order_items WHERE order_id = ?', [orderId]);
     const productIds = [];
     for (const item of items) {
-      if (item.productId) productIds.push(Number(item.productId));
+      if (item.product_id) productIds.push(Number(item.product_id));
     }
     if (productIds.length > 0) {
       const placeholders = productIds.map(() => '?').join(',');
       await conn.query(`SELECT id FROM products WHERE id IN (${placeholders}) AND has_stock = 1 FOR UPDATE`, productIds);
     }
     for (const item of items) {
-      if (item.productId) {
-        await conn.query('UPDATE products SET stock = stock + ? WHERE id = ? AND has_stock = 1', [Number(item.quantity) || 0, Number(item.productId)]);
+      if (item.product_id) {
+        await conn.query('UPDATE products SET stock = stock + ? WHERE id = ? AND has_stock = 1', [Number(item.quantity) || 0, Number(item.product_id)]);
       }
     }
     
@@ -3142,7 +3208,8 @@ app.get('/api/products/:id/orders', authenticateToken, async (req, res) => {
     const [orderRows] = await pool.query(`
       SELECT DISTINCT o.id, o.table_number, o.status, o.created_at, o.total
       FROM orders o
-      WHERE JSON_CONTAINS(o.items, JSON_OBJECT('productId', ?))
+      JOIN order_items oi ON o.id = oi.order_id
+      WHERE oi.product_id = ?
       ORDER BY o.created_at DESC
     `, [productId]);
     
@@ -3192,8 +3259,7 @@ app.delete('/api/products/bulk', authenticateToken, async (req, res) => {
       for (const productId of ids) {
         // Delete orders that contain this product
         const [orderRows] = await conn.query(
-          `SELECT id FROM orders 
-           WHERE JSON_CONTAINS(items, JSON_OBJECT('productId', ?))`,
+          `SELECT DISTINCT order_id FROM order_items WHERE product_id = ?`,
           [productId]
         );
         
@@ -3272,8 +3338,7 @@ app.delete('/api/products/:id', authenticateToken, async (req, res) => {
     if (force === 'true') {
       // Delete orders that contain this product
       const [orderRows] = await conn.query(`
-        SELECT id FROM orders 
-        WHERE JSON_CONTAINS(items, JSON_OBJECT('productId', ?))
+        SELECT DISTINCT order_id FROM order_items WHERE product_id = ?
       `, [productId]);
       
       for (const order of orderRows) {
